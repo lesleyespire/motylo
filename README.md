@@ -7,6 +7,8 @@ The full complete site is on a seperate address, but since it may be vulnerable 
 
 It's starting to work very well and we have voice chat, profile pictures, basic chat functions, basic moderation, authentication with hashes, typing indicators, profiles and private rooms!! There's still a lot more to come!
 
+## VISION BOARD
+
 Private Servers	-	Done
 
 Messages from the same user are bundled together	-	Done
@@ -49,4 +51,4 @@ Direct Messages	Medium
 
 Community Managers	Easy
 
-Community per user role	Medium	
+Community per user role	Medium
