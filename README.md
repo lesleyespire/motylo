@@ -8,24 +8,45 @@ The full complete site is on a seperate address, but since it may be vulnerable 
 It's starting to work very well and we have voice chat, profile pictures, basic chat functions, basic moderation, authentication with hashes, typing indicators, profiles and private rooms!! There's still a lot more to come!
 
 Private Servers	-	Done
+
 Messages from the same user are bundled together	-	Done
+
 Typing…	-	 Done
-Automatic database clearing (about every 18 hours.)	-	Done (Needs to be checked again_
+
+Automatic database clearing (about every 18 hours.)	-	Done (Needs to be checked again)
+
 Emoji support	-		Done
+
 Roles + username colours	-		Done
+
 File uploads	-		Medium
+
 Timestamps	-		Done
+
 Online, idle, dod (Member List?)	-		Medium (Hard)
+
 Replies	-		Medium
+
 delete-edit messages	-		Easy
+
 Basic Authentication	-		Medium
+
 Administrator Permissions	-		Hard
+
 User cards + bios	-	Done
+
 timeout	Hard
+
 bans	- Hard
+
 Voice chat?	- Done
+
 The Hub - Connections, user count -	Ultra Hard
+
 Community.php	Easy
+
 Direct Messages	Medium
+
 Community Managers	Easy
+
 Community per user role	Medium	
