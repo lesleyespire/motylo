@@ -1,5 +1,5 @@
 <?php
-// voice.php (full rewrite)
+// voice.php
 require "config.php";
 
 // must be logged in
