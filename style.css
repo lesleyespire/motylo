@@ -1,0 +1,53 @@
+body {
+    background:#2b2d31;
+    color:white;
+    font-family:Arial;
+}
+
+h1 { color:#7289da; }
+
+input {
+    background:#1e1f22;
+    border:1px solid #444;
+    color:white;
+    padding:8px;
+}
+
+button {
+    background:#7289da;
+    border:none;
+    padding:8px 14px;
+    color:white;
+}
+
+#chat-box {
+    height:400px;
+    overflow-y:auto;
+    background:#1e1f22;
+    border:1px solid #444;
+    padding:10px;
+}
+
+.msg {
+    margin-bottom:10px;
+}
+
+.error { color:red; }
+.ok { color:lightgreen; }
+
+#autocomplete {
+    z-index: 9999;
+}
+
+#typing {
+    z-index: 9999;
+}
+
+.msgBubble {
+    z-index: 1;
+}
+
+#input {
+    z-index: 10;
+}
+
