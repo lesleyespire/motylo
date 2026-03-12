@@ -169,7 +169,7 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 
 Edit config.php to include your own database details, and if you use voice chat, pusher credentials. Then upload all the files and folders (including empty folders).
 
-Finally, you just need to edit the database to have the necessary structure, you should be able to import the sql file (database.sql).
+Finally, you just need to edit the database to have the necessary structure, you should be able to import the sql file (database.sql). You will need to edit the file (You can turn it into a text file) and change the database name to your own.
 
 If you plan to use push notificiations, once again, just edit config.php with your credentials.
 
