@@ -3,7 +3,7 @@
 // DATABASE CONFIG
 // ==========================
 
-$DB_HOST = "INSERT;
+$DB_HOST = "INSERT";
 $DB_NAME = "INSERT";
 $DB_USER = "INSERT";
 $DB_PASS = "INSERT";
