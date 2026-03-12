@@ -6,6 +6,18 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 
 ### VISION BOARD AND COMPLETED FEATURES
 
+## General feature collection
+- [x] Mobile device UI
+- [x] Voice chat
+- [x] Typing indicators
+- [x] Avatars
+- [x] User moderation
+- [x] Messages
+- [x] Login/Register/guest accounts
+- [x] Channel Selection
+- [x] Community Selection
+- [x] Friend requests and Friends
+- [x] One-to-one mesages
 ## MOBILE
 - [x] Remove emoji button
 - [x] We don’t need username on every message
@@ -42,15 +54,13 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 - [x] Report message, reply to message, timeout user, ban user, untimeout user, manage roles
 - [ ] Timeouts an hour off
 - [ ] Enter in messages
-Community Expansion!
-——————————————
-Permissions
+## Community Expansion!
+# Permissions
 - [ ] Clusters in room.php
 - [ ] Cluster access
 - [ ] Cluster administrator powers
 - [ ] Cluster rules
-——————————————
-Community.php (UNIQUE! Collection of interconnected private rooms.)
+# Community.php (UNIQUE! Collection of interconnected private rooms.)
 - [x] Basic Framework
 - [x] Complex ids
 - [x] Nodes
@@ -73,8 +83,7 @@ Community.php (UNIQUE! Collection of interconnected private rooms.)
 - [ ] Hidden local roles
 - [ ] Hidden channels (Hide when no access)
 - [ ] Channels default to category permissions
-——————————————
-Community_admin.php (Allow the owners to edit)
+# Community_admin.php (Allow the owners to edit)
 - [x] Basic Framework
 - [x] Community Manager Role (Moderation powers)
 - [x] Administrator permissions
@@ -93,8 +102,7 @@ Community_admin.php (Allow the owners to edit)
 - [ ] Moderation and Interaction Bots
 - [ ] Democratic/Dictatorial - Users can decided whether they want their communities to vote for owner (or decided by staff vote) or be a simple dictator who owns it completely. There can also be multiple owners, but one representative (displayed in room.php on hover.)
 - [ ] Functional building blocks - this makes it less of a collection of chat rooms than an actual website. 
-——————————————
-Framework
+# Framework
 - [x] Channel creation
 - [ ] Cluster menu 
 - [ ] Cluster owner abilities
@@ -106,8 +114,7 @@ Framework
 - [ ] Simple server framework
 - [ ] Simple bot building blocks
 - [ ] Complex…
-——————————————
-Miscellaneous
+# Miscellaneous
 - [x] Ban/timeout enforcement private.php page
 - [x] Room.php -UPDATE Community reqs
 - [x] First community! The simple general chat room!
@@ -118,8 +125,7 @@ Miscellaneous
 - [ ] Mafia community! (Our second node!)
 - [ ] Private community clusters
 - [ ] Fully private communities
-——————————————
-Permissions
+# Permissions
 - [x] Access server framework
 - [x] Access Channel framework
 - [x] Timeout/Untimeout
@@ -139,8 +145,7 @@ Permissions
 - [ ] View audit-log
 - [ ] Unban
 - [ ] Untimeout
-——————————————
-Later Features
+# Later Features
 - [x] Stronger favicons
 - [ ] Show friends of friends- not just mutual friends 
 - [ ] DYNAMIC POLLING (Increases when rapid sending)
@@ -148,7 +153,7 @@ Later Features
 - [ ] Animations - Nicer buttons
 - [ ] Custom loading animations 
 - [ ] improve index.php
-Debug Days
+# Debug Days
 - [x] dm/friend push notifications broken.
 - [x] room.php bell broke
 - [x] Notification bell is broken literally everywhere
