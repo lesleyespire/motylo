@@ -162,3 +162,14 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 - [ ] Align mobile message bubbles 
 - [ ] Push notifs
 - [ ] Image replies
+
+### How to install it for yourself
+
+Edit config.php to include your own database details, and if you use voice chat, pusher credentials. Then upload all the files and folders (including empty folders).
+
+Finally, you just need to edit the database to have the necessary structure, you should be able to import the sql file (database.sql).
+
+One that's done, you just need a friend! 
+
+*This project is made possible with chatgpt coding. I'm unfortunately quite terrible at writing my own php at the moment.*
+
