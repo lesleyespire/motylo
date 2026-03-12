@@ -1,4 +1,8 @@
-# motylo
+# motylo - the private chat website
+
+What is Motylo? It's a chat website that has hosting requirements at the bare minimum. It uses polling instead of websockets, though in order to enable voice chat you'll have to make a Pusher account (free). 
+
+For more information, visit my odoo website: https://motylo.odoo.com/
 
 ### VISION BOARD AND COMPLETED FEATURES
 
