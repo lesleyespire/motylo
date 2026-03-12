@@ -6,7 +6,7 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 
 ### VISION BOARD AND COMPLETED FEATURES
 
-MOBILE
+## MOBILE
 - [x] Remove emoji button
 - [x] We don’t need username on every message
 - [x] Lots of pings
@@ -16,7 +16,7 @@ MOBILE
 - [ ] Remove private.php bar in community.php
 - [ ] Scrollable friends column 
 - [ ] All the private.php changes
-Simple Features
+## Simple Features
 - [x] Notif bell takes you to where you got the notif
 - [x] Hover card bio respects enter
 - [x] Remove role
