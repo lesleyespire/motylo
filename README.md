@@ -18,6 +18,8 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 - [x] Community Selection
 - [x] Friend requests and Friends
 - [x] One-to-one mesages
+- [x] In-site notifications
+- [x] Onesignal push notifications
 ## MOBILE
 - [x] Remove emoji button
 - [x] We don’t need username on every message
@@ -168,6 +170,8 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 Edit config.php to include your own database details, and if you use voice chat, pusher credentials. Then upload all the files and folders (including empty folders).
 
 Finally, you just need to edit the database to have the necessary structure, you should be able to import the sql file (database.sql).
+
+If you plan to use push notificiations, once again, just edit config.php with your credentials.
 
 One that's done, you just need a friend! 
 
