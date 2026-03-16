@@ -1,5 +1,3 @@
-![alt text](http://motylo.xyz/root/favicon.ico)
-
 # motylo - the private chat website
 
 What is Motylo? It's a chat website that has hosting requirements at the bare minimum (I designed and tested the site on free hosting before moving to a paid host.) It uses polling instead of websockets, though in order to enable voice chat you'll have to make a Pusher account (free). 
