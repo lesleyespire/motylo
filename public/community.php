@@ -33,7 +33,7 @@ $community_id = (int)$community['id'];
 // Ensure private_rooms has required columns
 try {
     $cols = $pdo->query("SHOW COLUMNS FROM private_rooms")->fetchAll(PDO::FETCH_COLUMN);
-    $cols_l = array_map('strtolower',$cols);
+    $cols_l = array_map('strtolower', $cols);
     if (!in_array('community_id', $cols_l)) {
         $pdo->exec("ALTER TABLE private_rooms ADD COLUMN community_id INT DEFAULT NULL");
     }
@@ -97,14 +97,16 @@ try {
 } catch (Exception $e) { $channels = []; }
 
 // Split rooms into regular / hidden / voice
+// Hidden rooms are shown only if the viewer can access them.
+// Voice chats are shown in their own section, and locked ones are visible but not enterable.
 $regular_channels = [];
 $hidden_channels = [];
 $voice_channels = [];
 foreach ($channels as $ch) {
-    if (!empty($ch['is_voice'])) {
-        $voice_channels[] = $ch;
-    } elseif (!empty($ch['is_hidden'])) {
+    if (!empty($ch['is_hidden'])) {
         $hidden_channels[] = $ch;
+    } elseif (!empty($ch['is_voice'])) {
+        $voice_channels[] = $ch;
     } else {
         $regular_channels[] = $ch;
     }
@@ -203,7 +205,7 @@ try {
     }
 } catch (Exception $e) { /* ignore */ }
 
-// per-channel accessibility function (same as previous)
+// per-channel accessibility function
 function user_can_view_channel($channel_required_role_id, $me_id, $community_id, $pdo, $is_owner, $is_admin) {
     if ($channel_required_role_id === null || $channel_required_role_id === 0) return true;
     if ($is_owner) return true;
@@ -237,6 +239,7 @@ $selected_kind = 'text';
 $default_text_choice = null;
 $default_voice_choice = null;
 
+// Regular channels: show all, but only selectable if accessible
 foreach ($regular_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
     if ($can) {
@@ -244,18 +247,24 @@ foreach ($regular_channels as $ch) {
         if ($default_text_choice === null) $default_text_choice = $ch['code'];
     }
 }
-foreach ($hidden_channels as $ch) {
-    $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
-    if ($can) {
-        $accessible_codes[] = $ch['code'];
-        if ($default_text_choice === null) $default_text_choice = $ch['code'];
-    }
-}
+
+// Voice channels: show all, but only selectable if accessible
 foreach ($voice_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
     if ($can) {
         $accessible_codes[] = $ch['code'];
         if ($default_voice_choice === null) $default_voice_choice = $ch['code'];
+    }
+}
+
+// Hidden channels: only include if accessible
+$visible_hidden_channels = [];
+foreach ($hidden_channels as $ch) {
+    $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+    if ($can) {
+        $accessible_codes[] = $ch['code'];
+        $visible_hidden_channels[] = $ch;
+        if ($default_text_choice === null) $default_text_choice = $ch['code'];
     }
 }
 
@@ -329,7 +338,7 @@ function render_community_blocks($pdo, $community_id, $channels, $general, $me_i
             } elseif (!empty($cfg['room_id'])) {
                 try {
                     $s = $pdo->prepare("SELECT code FROM private_rooms WHERE id = ? LIMIT 1");
-                    $s->execute([ (int)$cfg['room_id'] ]);
+                    $s->execute([(int)$cfg['room_id']]);
                     $rc = $s->fetchColumn();
                     if ($rc) $room_code = $rc;
                 } catch (Exception $e) {}
@@ -481,30 +490,13 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
         <div class="small">No channels yet</div>
       <?php else: foreach($regular_channels as $ch):
             $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
-            if (!$can) continue;
       ?>
-        <div class="channelItem roomItem" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="text" data-locked="0" data-required-role="<?= (int)$ch['required_role_id'] ?>">
+        <div class="channelItem roomItem <?= $can ? '' : 'locked' ?>" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="text" data-locked="<?= $can ? '0' : '1' ?>" data-required-role="<?= (int)$ch['required_role_id'] ?>">
           <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
           <div class="small"><?= $ch['required_role_id'] ? 'Locked' : 'Public' ?></div>
         </div>
       <?php endforeach; endif; ?>
     </div>
-
-    <?php if (!empty($hidden_channels)): ?>
-      <hr class="roomDivider" />
-      <div class="roomSectionTitle">Hidden rooms</div>
-      <div id="hiddenChannelsList">
-        <?php foreach($hidden_channels as $ch):
-              $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
-              if (!$can) continue;
-        ?>
-          <div class="channelItem roomItem" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="text" data-locked="0" data-required-role="<?= (int)$ch['required_role_id'] ?>">
-            <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
-            <div class="small">Hidden<?= $ch['required_role_id'] ? ' · Locked' : '' ?></div>
-          </div>
-        <?php endforeach; ?>
-      </div>
-    <?php endif; ?>
 
     <?php if (!empty($voice_channels)): ?>
       <hr class="roomDivider" />
@@ -512,11 +504,28 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
       <div id="voiceChannelsList">
         <?php foreach($voice_channels as $ch):
               $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
-              if (!$can) continue;
         ?>
-          <div class="channelItem roomItem" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="voice" data-locked="0" data-required-role="<?= (int)$ch['required_role_id'] ?>">
+          <div class="channelItem roomItem <?= $can ? '' : 'locked' ?>" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="voice" data-locked="<?= $can ? '0' : '1' ?>" data-required-role="<?= (int)$ch['required_role_id'] ?>">
             <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
-            <div class="small">Voice<?= $ch['required_role_id'] ? ' · Locked' : '' ?></div>
+            <div class="small"><?= $ch['required_role_id'] ? 'Locked' : 'Public' ?></div>
+          </div>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+
+    <?php if (!empty($visible_hidden_channels)): ?>
+      <hr class="roomDivider" />
+      <div class="roomSectionTitle">Hidden rooms</div>
+      <div id="hiddenChannelsList">
+        <?php foreach($visible_hidden_channels as $ch):
+              $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+              if (!$can) continue; // hidden rooms only appear when actually accessible
+        ?>
+          <div class="channelItem roomItem <?= $can ? '' : 'locked' ?>" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="<?= !empty($ch['is_voice']) ? 'voice' : 'text' ?>" data-locked="<?= $can ? '0' : '1' ?>" data-required-role="<?= (int)$ch['required_role_id'] ?>">
+            <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
+            <div class="small">
+              Hidden<?= !empty($ch['is_voice']) ? ' voice' : '' ?><?= $ch['required_role_id'] ? ' · Locked' : '' ?>
+            </div>
           </div>
         <?php endforeach; ?>
       </div>
@@ -543,6 +552,12 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
               <option value="voice">Voice chat</option>
             </select>
           </div>
+          <div class="formRow">
+            <label style="display:flex;align-items:center;gap:8px;color:#eef3ff;font-size:14px;">
+              <input type="checkbox" name="is_hidden" value="1">
+              Hidden room
+            </label>
+          </div>
           <div><button class="btn" type="submit">Create</button></div>
         </form>
       <?php else: ?>
@@ -564,10 +579,10 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
       <?php endif; ?>
     </div>
 
-    <!-- BLOCKS: render any blocks for this community (non-destructive, uses existing private.php for chat blocks) -->
+    <!-- BLOCKS: render any blocks for this community -->
     <div id="blocksContainer" style="margin-top:12px">
       <?php
-        echo render_community_blocks($pdo, $community_id, array_merge($regular_channels, $hidden_channels, $voice_channels), $general, $me_id, $is_owner, $is_admin);
+        echo render_community_blocks($pdo, $community_id, array_merge($regular_channels, $voice_channels, $visible_hidden_channels), $general, $me_id, $is_owner, $is_admin);
       ?>
     </div>
   </section>
@@ -631,8 +646,13 @@ function setActiveRoom(el) {
 const roomEls = Array.from(document.querySelectorAll('.roomItem'));
 roomEls.forEach(el => {
   el.addEventListener('click', (ev) => {
+    const locked = el.dataset.locked === '1';
     const code = el.dataset.code;
     const kind = el.dataset.kind || 'text';
+    if (locked) {
+      alert('You do not have permission to view this channel.');
+      return;
+    }
     if (!code) return;
     setActiveRoom(el);
     loadRoom(code, kind);
@@ -657,20 +677,6 @@ if (newChannelForm) {
 
       if (j && j.ok) {
         const roomType = (j.is_voice || j.room_type === 'voice') ? 'voice' : 'text';
-        const targetContainer = roomType === 'voice'
-          ? document.getElementById('voiceChannelsList')
-          : (j.is_hidden ? document.getElementById('hiddenChannelsList') : document.getElementById('channelsList'));
-
-        if (!targetContainer && roomType === 'voice') {
-          location.reload();
-          return;
-        }
-
-        // If hidden section or voice section doesn't exist yet, reload for safety
-        if ((j.is_hidden && !document.getElementById('hiddenChannelsList')) || (roomType === 'voice' && !document.getElementById('voiceChannelsList'))) {
-          location.reload();
-          return;
-        }
 
         const div = document.createElement('div');
         div.className = 'channelItem roomItem';
@@ -684,13 +690,23 @@ if (newChannelForm) {
         `;
 
         div.addEventListener('click', () => {
+          const locked = div.dataset.locked === '1';
+          if (locked) {
+            alert('You do not have permission to view this channel.');
+            return;
+          }
           setActiveRoom(div);
           loadRoom(j.code, roomType);
         });
 
         if (roomType === 'voice') {
           const voiceList = document.getElementById('voiceChannelsList');
-          if (voiceList) voiceList.appendChild(div);
+          if (voiceList) {
+            voiceList.appendChild(div);
+          } else {
+            location.reload();
+            return;
+          }
         } else if (j.is_hidden) {
           const hiddenList = document.getElementById('hiddenChannelsList');
           if (hiddenList) {
