@@ -30,7 +30,7 @@ if ($public_id !== '') {
 if (!$community) { die("Community not found."); }
 $community_id = (int)$community['id'];
 
-// Ensure private_rooms has community_id column
+// Ensure private_rooms has required columns
 try {
     $cols = $pdo->query("SHOW COLUMNS FROM private_rooms")->fetchAll(PDO::FETCH_COLUMN);
     $cols_l = array_map('strtolower',$cols);
@@ -42,6 +42,9 @@ try {
     }
     if (!in_array('is_hidden', $cols_l)) {
         $pdo->exec("ALTER TABLE private_rooms ADD COLUMN is_hidden TINYINT(1) NOT NULL DEFAULT 0");
+    }
+    if (!in_array('is_voice', $cols_l)) {
+        $pdo->exec("ALTER TABLE private_rooms ADD COLUMN is_voice TINYINT(1) NOT NULL DEFAULT 0");
     }
 } catch (Exception $e) { /* ignore */ }
 
@@ -67,6 +70,7 @@ try {
             community_id INT DEFAULT NULL,
             required_role_id INT DEFAULT NULL,
             is_hidden TINYINT(1) NOT NULL DEFAULT 0,
+            is_voice TINYINT(1) NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         $s = $pdo->prepare("SELECT id, code, name FROM private_rooms WHERE community_id = ? AND name = 'general' LIMIT 1");
@@ -87,16 +91,23 @@ try {
 // Load channels
 $channels = [];
 try {
-    $s = $pdo->prepare("SELECT id, code, name, required_role_id, is_hidden FROM private_rooms WHERE community_id = ? ORDER BY id ASC");
+    $s = $pdo->prepare("SELECT id, code, name, required_role_id, is_hidden, is_voice FROM private_rooms WHERE community_id = ? ORDER BY id ASC");
     $s->execute([$community_id]);
     $channels = $s->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) { $channels = []; }
 
-// Only show non-hidden rooms in the community bar/sidebar
-$visible_channels = [];
+// Split rooms into regular / hidden / voice
+$regular_channels = [];
+$hidden_channels = [];
+$voice_channels = [];
 foreach ($channels as $ch) {
-    if (!empty($ch['is_hidden'])) continue;
-    $visible_channels[] = $ch;
+    if (!empty($ch['is_voice'])) {
+        $voice_channels[] = $ch;
+    } elseif (!empty($ch['is_hidden'])) {
+        $hidden_channels[] = $ch;
+    } else {
+        $regular_channels[] = $ch;
+    }
 }
 
 // load roles and user's membership
@@ -219,19 +230,50 @@ function user_can_view_channel($channel_required_role_id, $me_id, $community_id,
     return false;
 }
 
-// build accessible set and initial selected_code (preserve previous selection if still allowed)
+// build accessible sets
 $accessible_codes = [];
 $selected_code = $_GET['code'] ?? ($general['code'] ?? null);
-$default_choice = null;
-foreach ($visible_channels as $ch) {
+$selected_kind = 'text';
+$default_text_choice = null;
+$default_voice_choice = null;
+
+foreach ($regular_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
-    if ($can) $accessible_codes[] = $ch['code'];
-    if ($default_choice === null && $can) $default_choice = $ch['code'];
+    if ($can) {
+        $accessible_codes[] = $ch['code'];
+        if ($default_text_choice === null) $default_text_choice = $ch['code'];
+    }
 }
+foreach ($hidden_channels as $ch) {
+    $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+    if ($can) {
+        $accessible_codes[] = $ch['code'];
+        if ($default_text_choice === null) $default_text_choice = $ch['code'];
+    }
+}
+foreach ($voice_channels as $ch) {
+    $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+    if ($can) {
+        $accessible_codes[] = $ch['code'];
+        if ($default_voice_choice === null) $default_voice_choice = $ch['code'];
+    }
+}
+
 if ($selected_code && !in_array($selected_code, $accessible_codes, true)) {
-    $selected_code = $default_choice;
+    $selected_code = $default_text_choice ?: $default_voice_choice;
 }
-if (!$selected_code && $default_choice) $selected_code = $default_choice;
+if (!$selected_code) {
+    $selected_code = $default_text_choice ?: $default_voice_choice;
+}
+
+if ($selected_code) {
+    foreach ($voice_channels as $vc) {
+        if ((string)$vc['code'] === (string)$selected_code) {
+            $selected_kind = 'voice';
+            break;
+        }
+    }
+}
 
 // prepare roles JSON for JS (all roles that exist in this community) so client can list them for add/remove
 $roles_for_js = [];
@@ -254,21 +296,18 @@ $roles_json = json_encode($roles_for_js, JSON_UNESCAPED_UNICODE);
    ----------------------------- */
 
 function render_community_blocks($pdo, $community_id, $channels, $general, $me_id, $is_owner, $is_admin) {
-    // check table exists
     $has = (bool)$pdo->query("SHOW TABLES LIKE 'community_blocks'")->fetchColumn();
-    if (!$has) return ''; // nothing to show safely
+    if (!$has) return '';
 
-    // fetch visible blocks for this community
     try {
         $st = $pdo->prepare("SELECT * FROM community_blocks WHERE community_id = ? AND visible = 1 ORDER BY position ASC, id ASC");
         $st->execute([$community_id]);
         $blocks = $st->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {
-        return ''; // safe fail
+        return '';
     }
     if (empty($blocks)) return '';
 
-    // build quick channel-code map for lookup
     $channelCodes = [];
     foreach ($channels as $ch) {
         if (!empty($ch['code'])) $channelCodes[$ch['code']] = $ch;
@@ -282,14 +321,12 @@ function render_community_blocks($pdo, $community_id, $channels, $general, $me_i
             $cfg = json_decode($b['config_json'], true) ?: [];
         }
         $blockTitle = htmlspecialchars($b['code'] ?: ($b['block_type'] ?? 'block'));
-        // For chat block: reuse the existing channel functionality by embedding private.php?code=...
+
         if ($type === 'chat') {
-            // try: 1) config.room_code, 2) config.room_id -> find code, 3) block code matching channel code, 4) default general
             $room_code = null;
             if (!empty($cfg['room_code'])) {
                 $room_code = $cfg['room_code'];
             } elseif (!empty($cfg['room_id'])) {
-                // try to find code by id
                 try {
                     $s = $pdo->prepare("SELECT code FROM private_rooms WHERE id = ? LIMIT 1");
                     $s->execute([ (int)$cfg['room_id'] ]);
@@ -301,14 +338,13 @@ function render_community_blocks($pdo, $community_id, $channels, $general, $me_i
             } elseif (!empty($general['code'])) {
                 $room_code = $general['code'];
             }
+
             if (!$room_code) {
-                // nothing we can safely do
                 $html .= "<div class='block chat-block' style='padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:10px'><strong>{$blockTitle}</strong><div class='small' style='margin-top:6px;color:#bfc9d9'>No room configured</div></div>\n";
             } else {
                 $safeCode = rawurlencode($room_code);
                 $html .= "<div class='block chat-block' style='padding:8px;border-radius:10px;background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent);margin-bottom:10px'>";
                 $html .= "<div style='display:flex;justify-content:space-between;align-items:center;padding:6px 8px'><strong>{$blockTitle}</strong><span class='small'>chat block — room: ".htmlspecialchars($room_code)."</span></div>";
-                // iframe (same origin) - uses existing private.php so all access/owner logic remains intact
                 $html .= "<div style='height:360px;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.03)'>";
                 $html .= "<iframe src='private.php?code={$safeCode}' style='border:0;width:100%;height:100%;min-height:360px'></iframe>";
                 $html .= "</div></div>\n";
@@ -335,7 +371,6 @@ function render_community_blocks($pdo, $community_id, $channels, $general, $me_i
             }
             $html .= "</div>\n";
         } else {
-            // generic block stub
             $html .= "<div class='block generic-block' style='padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:10px'><strong>{$blockTitle}</strong>";
             $html .= "<div class='small' style='margin-top:6px;color:#bfc9d9'>Type: ".htmlspecialchars($b['block_type'])." — Config: ".htmlspecialchars($b['config_json'] ?? '')."</div>";
             $html .= "</div>\n";
@@ -375,16 +410,17 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
 .topActions{display:flex;gap:8px;align-items:center}
 .toggleBtn{background:transparent;font-size:28px;border:1px solid rgba(255,255,255,0.03);padding:6px 8px;border-radius:8px;color:var(--muted);cursor:pointer}
 .blocksArea{margin-top:12px}
+.roomDivider{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:12px 0}
+.roomSectionTitle{font-weight:800;margin-bottom:8px}
 @media (max-width:900px){ .side{display:none} }
-    
+
 /* notification bell (room-style additions) */
 .bell1 { position:relative; cursor:pointer; padding:6px 8px; border-radius:8px; background:rgba(255,255,255,0.02); }
 .badge { position:absolute; top:-6px; right:-6px; background:#ff4d4f; color:white; border-radius:12px; padding:2px 6px; font-size:12px; min-width:24px; text-align:center; }
 .notifBox{position:absolute; right:12px; top:64px; background:#0b1114; border-radius:8px; padding:12px; min-width:360px; max-width:520px; box-shadow:0 8px 24px rgba(0,0,0,.6); display:none; z-index:1000}
 .notifRow{padding:8px 6px;border-bottom:1px solid rgba(255,255,255,0.03);font-size:13px}
-.notifRow:last-child{border-bottom:0}    
+.notifRow:last-child{border-bottom:0}
 
-/* grouped notification styles */
 .notifGroup{display:flex;gap:10px;align-items:center;padding:8px;border-radius:8px;cursor:pointer;transition:background .12s;position:relative}
 .notifGroup.unread{background:rgba(255,255,255,0.02)}
 .notifGroup.modmail{border-left:4px solid var(--accent); background: linear-gradient(90deg, rgba(43,111,178,0.06), transparent)}
@@ -394,9 +430,9 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
 .notifGroup .meta .msg{color:var(--muted);font-size:13px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .notifGroup .time{font-size:12px;color:#9aa1b0;min-width:80px;text-align:right}
 .notifCount{background:#ff4d4f;color:#fff;padding:4px 8px;border-radius:999px;font-weight:700;font-size:12px;min-width:36px;text-align:center}
-.unreadDot{width:10px;height:10px;border-radius:50%;background:#ff4d4f;margin-left:8px;box-shadow:0 0 0 3px rgba(255,77,79,0.06)}   
-    
-.markAll{display:flex;justify-content:flex-end;margin-bottom:8px}  
+.unreadDot{width:10px;height:10px;border-radius:50%;background:#ff4d4f;margin-left:8px;box-shadow:0 0 0 3px rgba(255,77,79,0.06)}
+
+.markAll{display:flex;justify-content:flex-end;margin-bottom:8px}
 </style>
 </head>
 <body>
@@ -409,7 +445,6 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
   <div class="topActions">
     <button onclick="location.href='room.php'" class="btn">Back to Nodes</button>
     <?php if ($is_admin): ?><button onclick="location.href='community_admin.php?public_id=<?= rawurlencode($community['public_id'] ?? '') ?>'" class="btn">Admin</button><?php endif; ?>
-<!-- notification bell --->
     <div id="notifBell" class="bell1" title="Notifications" style="margin-left:6px">
       🔔
       <span id="notifBadge" class="badge" style="display:none">0</span>
@@ -439,31 +474,73 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
 
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.03);margin:12px 0" />
 
-    <div style="font-weight:800;margin-bottom:8px">Channels</div>
+    <div class="roomSectionTitle">Channels</div>
+
     <div id="channelsList">
-      <?php if (empty($visible_channels)): ?>
+      <?php if (empty($regular_channels)): ?>
         <div class="small">No channels yet</div>
-      <?php else: foreach($visible_channels as $ch):
+      <?php else: foreach($regular_channels as $ch):
             $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+            if (!$can) continue;
       ?>
-        <div class="channelItem <?= $can ? '' : 'locked' ?>" data-code="<?= htmlspecialchars($ch['code']) ?>" data-locked="<?= $can ? '0' : '1' ?>" data-required-role="<?= (int)$ch['required_role_id'] ?>">
+        <div class="channelItem roomItem" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="text" data-locked="0" data-required-role="<?= (int)$ch['required_role_id'] ?>">
           <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
           <div class="small"><?= $ch['required_role_id'] ? 'Locked' : 'Public' ?></div>
         </div>
       <?php endforeach; endif; ?>
     </div>
 
+    <?php if (!empty($hidden_channels)): ?>
+      <hr class="roomDivider" />
+      <div class="roomSectionTitle">Hidden rooms</div>
+      <div id="hiddenChannelsList">
+        <?php foreach($hidden_channels as $ch):
+              $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+              if (!$can) continue;
+        ?>
+          <div class="channelItem roomItem" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="text" data-locked="0" data-required-role="<?= (int)$ch['required_role_id'] ?>">
+            <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
+            <div class="small">Hidden<?= $ch['required_role_id'] ? ' · Locked' : '' ?></div>
+          </div>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+
+    <?php if (!empty($voice_channels)): ?>
+      <hr class="roomDivider" />
+      <div class="roomSectionTitle">Voice chats</div>
+      <div id="voiceChannelsList">
+        <?php foreach($voice_channels as $ch):
+              $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
+              if (!$can) continue;
+        ?>
+          <div class="channelItem roomItem" data-code="<?= htmlspecialchars($ch['code']) ?>" data-kind="voice" data-locked="0" data-required-role="<?= (int)$ch['required_role_id'] ?>">
+            <div class="name"><?= htmlspecialchars($ch['name']) ?></div>
+            <div class="small">Voice<?= $ch['required_role_id'] ? ' · Locked' : '' ?></div>
+          </div>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+
     <div style="margin-top:12px">
       <?php if ($is_admin): ?>
         <div style="font-weight:800">Create channel</div>
         <form id="newChannelForm">
-          <div class="formRow"><input name="name" placeholder="channel name" style="width:100%;padding:8px;border-radius:6px;border:0;background:#0b0f12;color:#fff" required></div>
+          <div class="formRow">
+            <input name="name" placeholder="channel name" style="width:100%;padding:8px;border-radius:6px;border:0;background:#0b0f12;color:#fff" required>
+          </div>
           <div class="formRow">
             <select name="required_role_id" style="width:100%;padding:8px;border-radius:6px;border:0;background:#0b0f12;color:#fff">
               <option value="">Public (no role)</option>
               <?php foreach ($roles as $r): ?>
                 <option value="<?= (int)$r['id'] ?>"><?= htmlspecialchars($r['name']) ?></option>
               <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="formRow">
+            <select name="room_type" style="width:100%;padding:8px;border-radius:6px;border:0;background:#0b0f12;color:#fff">
+              <option value="text">Text room</option>
+              <option value="voice">Voice chat</option>
             </select>
           </div>
           <div><button class="btn" type="submit">Create</button></div>
@@ -477,7 +554,11 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
   <section class="main" id="mainContent">
     <div class="iframeWrap" id="iframeWrap" aria-live="polite">
       <?php if (!empty($selected_code)): ?>
-        <iframe id="chatFrame" src="private.php?code=<?= rawurlencode($selected_code) ?>" style="border:0;width:100%;height:100%"></iframe>
+        <?php if ($selected_kind === 'voice'): ?>
+          <iframe id="chatFrame" src="private_voice.php?code=<?= rawurlencode($selected_code) ?>" style="border:0;width:100%;height:100%"></iframe>
+        <?php else: ?>
+          <iframe id="chatFrame" src="private.php?code=<?= rawurlencode($selected_code) ?>" style="border:0;width:100%;height:100%"></iframe>
+        <?php endif; ?>
       <?php else: ?>
         <div style="padding:24px;color:var(--muted)">You do not currently have access to any channels in this community.</div>
       <?php endif; ?>
@@ -486,23 +567,21 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
     <!-- BLOCKS: render any blocks for this community (non-destructive, uses existing private.php for chat blocks) -->
     <div id="blocksContainer" style="margin-top:12px">
       <?php
-        // safe render: uses helper function above
-        echo render_community_blocks($pdo, $community_id, $channels, $general, $me_id, $is_owner, $is_admin);
+        echo render_community_blocks($pdo, $community_id, array_merge($regular_channels, $hidden_channels, $voice_channels), $general, $me_id, $is_owner, $is_admin);
       ?>
     </div>
   </section>
 </div>
-    
-<!-- hover box for user roles -->
+
 <div id="userRolesHover" class="userRolesHover" aria-hidden="true"></div>
 
-<!-- notification dropdown -->
 <div id="notifDropdown" class="notifBox" aria-hidden="true" style="display:none">
   <div class="markAll"><button id="markAllBtn" style="background:transparent;border:0;color:var(--accent);cursor:pointer">Mark all read</button></div>
   <div id="notifList" style="max-height:420px;overflow:auto">
     <div style="padding:12px;color:var(--muted)">Loading…</div>
   </div>
 </div>
+
 <script>
 /* ---------- config & state from PHP ---------- */
 const COMMUNITY_ID = <?= json_encode($community_id) ?>;
@@ -512,8 +591,8 @@ const CAN_TIMEOUT = <?= $can_timeout ? 'true' : 'false' ?>;
 const CAN_BAN = <?= $can_ban ? 'true' : 'false' ?>;
 const CAN_MANAGE_ROLES = <?= $can_manage_roles ? 'true' : 'false' ?>;
 const ME_ID = <?= json_encode($me_id) ?>;
-const ROLES = <?= $roles_json ?>; // roles available in this community
-const USER_ROLES_ME = <?= json_encode($user_roles_for_me) ?>; // roles current user holds
+const ROLES = <?= $roles_json ?>;
+const USER_ROLES_ME = <?= json_encode($user_roles_for_me) ?>;
 const NOTIF_ENDPOINT = 'notifications.php';
 
 /* Sidebar toggle */
@@ -521,30 +600,42 @@ const toggleBtn = document.getElementById('toggleSidebar');
 const sidebar = document.getElementById('sidebar');
 toggleBtn.addEventListener('click', ()=> sidebar.classList.toggle('hidden'));
 
-/* Channels behaviour */
-const channelEls = Array.from(document.querySelectorAll('.channelItem'));
-let chatFrame = document.getElementById('chatFrame');
-channelEls.forEach(el => {
+/* Rooms behaviour */
+function loadRoom(code, kind) {
+  const iframeWrap = document.getElementById('iframeWrap');
+  const src = kind === 'voice'
+    ? 'private_voice.php?code=' + encodeURIComponent(code)
+    : 'private.php?code=' + encodeURIComponent(code);
+
+  let chatFrame = document.getElementById('chatFrame');
+  if (chatFrame) {
+    chatFrame.src = src;
+  } else {
+    const ifr = document.createElement('iframe');
+    ifr.id = 'chatFrame';
+    ifr.src = src;
+    ifr.style.border = 0;
+    ifr.style.width = '100%';
+    ifr.style.height = '100%';
+    iframeWrap.innerHTML = '';
+    iframeWrap.appendChild(ifr);
+    chatFrame = ifr;
+  }
+}
+
+function setActiveRoom(el) {
+  document.querySelectorAll('.roomItem').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+}
+
+const roomEls = Array.from(document.querySelectorAll('.roomItem'));
+roomEls.forEach(el => {
   el.addEventListener('click', (ev) => {
-    const locked = el.dataset.locked === '1';
     const code = el.dataset.code;
-    if (locked) {
-      alert('You do not have permission to view this channel.');
-      return;
-    }
+    const kind = el.dataset.kind || 'text';
     if (!code) return;
-    channelEls.forEach(c=>c.classList.remove('active'));
-    el.classList.add('active');
-    if (chatFrame) chatFrame.src = 'private.php?code=' + encodeURIComponent(code);
-    else {
-      const ifr = document.createElement('iframe');
-      ifr.id = 'chatFrame';
-      ifr.src = 'private.php?code=' + encodeURIComponent(code);
-      ifr.style.border = 0; ifr.style.width = '100%'; ifr.style.height = '100%';
-      document.getElementById('iframeWrap').innerHTML = '';
-      document.getElementById('iframeWrap').appendChild(ifr);
-      chatFrame = ifr;
-    }
+    setActiveRoom(el);
+    loadRoom(code, kind);
   });
 });
 
@@ -555,44 +646,81 @@ if (newChannelForm) {
     ev.preventDefault();
     const fd = new FormData(newChannelForm);
     fd.append('community_id', COMMUNITY_ID);
+
     try {
-      const res = await fetch('community_interface.php?action=create_room', { method:'POST', body: fd, credentials:'same-origin' });
+      const res = await fetch('community_interface.php?action=create_room', {
+        method:'POST',
+        body: fd,
+        credentials:'same-origin'
+      });
       const j = await res.json();
+
       if (j && j.ok) {
+        const roomType = (j.is_voice || j.room_type === 'voice') ? 'voice' : 'text';
+        const targetContainer = roomType === 'voice'
+          ? document.getElementById('voiceChannelsList')
+          : (j.is_hidden ? document.getElementById('hiddenChannelsList') : document.getElementById('channelsList'));
+
+        if (!targetContainer && roomType === 'voice') {
+          location.reload();
+          return;
+        }
+
+        // If hidden section or voice section doesn't exist yet, reload for safety
+        if ((j.is_hidden && !document.getElementById('hiddenChannelsList')) || (roomType === 'voice' && !document.getElementById('voiceChannelsList'))) {
+          location.reload();
+          return;
+        }
+
         const div = document.createElement('div');
-        div.className='channelItem';
+        div.className = 'channelItem roomItem';
         div.dataset.code = j.code;
+        div.dataset.kind = roomType;
         div.dataset.locked = j.required_role_id ? '1' : '0';
-        div.innerHTML = `<div class="name">${j.name}</div><div class="small">${j.required_role_id ? 'Locked' : 'Public'}</div>`;
-        document.getElementById('channelsList').appendChild(div);
-        div.addEventListener('click', ()=> {
-          channelEls.forEach(c=>c.classList.remove('active'));
-          div.classList.add('active');
-          if (chatFrame) chatFrame.src = 'private.php?code=' + encodeURIComponent(j.code);
+        div.dataset.requiredRole = j.required_role_id || '';
+        div.innerHTML = `
+          <div class="name">${j.name}</div>
+          <div class="small">${roomType === 'voice' ? 'Voice' : (j.is_hidden ? 'Hidden' : (j.required_role_id ? 'Locked' : 'Public'))}</div>
+        `;
+
+        div.addEventListener('click', () => {
+          setActiveRoom(div);
+          loadRoom(j.code, roomType);
         });
+
+        if (roomType === 'voice') {
+          const voiceList = document.getElementById('voiceChannelsList');
+          if (voiceList) voiceList.appendChild(div);
+        } else if (j.is_hidden) {
+          const hiddenList = document.getElementById('hiddenChannelsList');
+          if (hiddenList) {
+            hiddenList.appendChild(div);
+          } else {
+            location.reload();
+            return;
+          }
+        } else {
+          document.getElementById('channelsList').appendChild(div);
+        }
+
         newChannelForm.reset();
         alert('Channel created');
       } else {
         alert(j && j.error ? j.error : 'Failed to create channel');
       }
-    } catch (err) { console.error(err); alert('Create failed'); }
+    } catch (err) {
+      console.error(err);
+      alert('Create failed');
+    }
   });
 }
 
-/* ------------------ parent -> iframe enhancement ------------------
-   - force links inside iframe to open in top window
-   - intercept right-clicks on user links/messages and show moderation menu (parent).
-   - show hover box for roles (parent).
-   This is done from the parent to avoid changing private.php if possible.
-   Works only same-origin.
--------------------------------------------------------------------*/
-
+/* ------------------ parent -> iframe enhancement ------------------ */
 const ctxtMenu = document.getElementById('contextMenu');
 const ctxtTitle = document.getElementById('contextMenuTitle');
 const userRolesHover = document.getElementById('userRolesHover');
-let currentTargetUser = null; // { id, username } from clicked user
+let currentTargetUser = null;
 
-/* helper: safely access iframe document (same-origin) */
 function getIframeDoc() {
   const ifr = document.getElementById('chatFrame');
   if (!ifr) return null;
@@ -600,15 +728,12 @@ function getIframeDoc() {
   catch (e) { return null; }
 }
 
-/* once iframe is loaded, attach event delegation */
 async function enhanceIframeOnceLoaded() {
   const ifr = document.getElementById('chatFrame');
   if (!ifr) return;
-  // attach onload so future navigation re-attaches
   ifr.addEventListener('load', ()=> {
     enhanceIframeElements();
   });
-  // initial attach (if already loaded)
   enhanceIframeElements();
 }
 
@@ -616,41 +741,32 @@ function enhanceIframeElements(){
   const doc = getIframeDoc();
   if (!doc) return;
   try {
-    // 1) make all <a> open top (so links go to main window)
     const anchors = doc.querySelectorAll('a[href]');
     anchors.forEach(a => {
       try {
         a.setAttribute('target','_top');
-        // also add click handler in case target is overridden
         a.addEventListener('click', (ev)=> {
           const href = a.getAttribute('href');
           if (!href) return;
           if (href.startsWith('javascript:')) return;
-          // open in top
           window.top.location.href = href;
           ev.preventDefault();
         });
       } catch(e){}
     });
 
-    // 2) delegate contextmenu (right-click) on username links, avatar links, or msg rows
     doc.addEventListener('contextmenu', function(e){
       const target = e.target.closest('.userLink, .avatarLink, .msgRow, .username, [data-username]');
       if (!target) return;
-      // find username and user id data if available in DOM attributes
       let username = null;
       let userId = null;
-      // look up the chain for data attributes commonly used in private.php
       const el = e.target.closest('[data-username],[data-user-id]') || e.target;
       if (el) {
         username = el.getAttribute('data-username') || el.getAttribute('data-user') || (el.textContent || null);
         userId = el.getAttribute('data-user-id') || el.getAttribute('data-userid') || null;
       }
-      // As a fallback, try to parse username from link text
       if (!username && target.textContent) username = target.textContent.trim().split(/\s+/)[0];
-      // Ask server for user id if not present (try to resolve by username)
       if (!userId && username) {
-        // perform fetch to resolve username -> id
         fetch('community_interface.php?action=resolve_user&username=' + encodeURIComponent(username) + '&community_id=' + encodeURIComponent(COMMUNITY_ID), { credentials:'same-origin' })
           .then(r => r.json())
           .then(j => {
@@ -667,7 +783,6 @@ function enhanceIframeElements(){
       e.preventDefault();
     }, true);
   } catch (err) {
-    // silent fail (likely cross-origin)
     console.warn('enhanceIframeElements failed', err);
   }
 }
@@ -675,8 +790,6 @@ function enhanceIframeElements(){
 function showModerationMenuAt(pageX, pageY, username, userId) {
   currentTargetUser = { id: userId, username: username };
   ctxtTitle.textContent = username || 'User';
-  // position but avoid going off-screen
-  const box = ctxtMenu.getBoundingClientRect();
   let left = pageX, top = pageY;
   if (left + 240 > window.innerWidth) left = window.innerWidth - 260;
   if (top + 200 > window.innerHeight) top = window.innerHeight - 220;
@@ -687,14 +800,12 @@ function showModerationMenuAt(pageX, pageY, username, userId) {
 }
 function escapeHtml(s){ if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-/* start: wait for iframe and attach enhancements */
 (function initEnhancements(){
   enhanceIframeOnceLoaded();
-  // re-run if iframe replaced
   new MutationObserver(() => { enhanceIframeOnceLoaded(); }).observe(document.getElementById('iframeWrap'), { childList: true, subtree: false });
 })();
 
-// -------------- notifications bell (grouped) ----------------
+/* -------------- notifications bell (grouped) ---------------- */
 const notifBell = document.getElementById('notifBell');
 const notifBadge = document.getElementById('notifBadge');
 const notifDropdown = document.getElementById('notifDropdown');
@@ -913,11 +1024,9 @@ async function startNotifPolling() {
     }, 30000);
   } catch(e){}
 }
-notifBell.addEventListener('click', ()=> { /* toggle handled by notification code */ });    
+notifBell.addEventListener('click', ()=> { /* toggle handled by notification code */ });
 
 startNotifPolling().then(()=> { startNotifPolling(); startNotifPolling(); }).catch(()=>{ startNotifPolling(); });
-    
-/* small: resolve user id endpoint already used above will be implemented in community_interface.php */
 </script>
 </body>
 </html>
