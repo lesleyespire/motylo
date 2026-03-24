@@ -40,6 +40,9 @@ try {
     if (!in_array('required_role_id', $cols_l)) {
         $pdo->exec("ALTER TABLE private_rooms ADD COLUMN required_role_id INT DEFAULT NULL");
     }
+    if (!in_array('is_hidden', $cols_l)) {
+        $pdo->exec("ALTER TABLE private_rooms ADD COLUMN is_hidden TINYINT(1) NOT NULL DEFAULT 0");
+    }
 } catch (Exception $e) { /* ignore */ }
 
 // ensure there is a general room
@@ -63,6 +66,7 @@ try {
             name VARCHAR(255) NOT NULL,
             community_id INT DEFAULT NULL,
             required_role_id INT DEFAULT NULL,
+            is_hidden TINYINT(1) NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         $s = $pdo->prepare("SELECT id, code, name FROM private_rooms WHERE community_id = ? AND name = 'general' LIMIT 1");
@@ -83,10 +87,17 @@ try {
 // Load channels
 $channels = [];
 try {
-    $s = $pdo->prepare("SELECT id, code, name, required_role_id FROM private_rooms WHERE community_id = ? ORDER BY id ASC");
+    $s = $pdo->prepare("SELECT id, code, name, required_role_id, is_hidden FROM private_rooms WHERE community_id = ? ORDER BY id ASC");
     $s->execute([$community_id]);
     $channels = $s->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) { $channels = []; }
+
+// Only show non-hidden rooms in the community bar/sidebar
+$visible_channels = [];
+foreach ($channels as $ch) {
+    if (!empty($ch['is_hidden'])) continue;
+    $visible_channels[] = $ch;
+}
 
 // load roles and user's membership
 $roles = [];
@@ -212,7 +223,7 @@ function user_can_view_channel($channel_required_role_id, $me_id, $community_id,
 $accessible_codes = [];
 $selected_code = $_GET['code'] ?? ($general['code'] ?? null);
 $default_choice = null;
-foreach ($channels as $ch) {
+foreach ($visible_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
     if ($can) $accessible_codes[] = $ch['code'];
     if ($default_choice === null && $can) $default_choice = $ch['code'];
@@ -234,6 +245,105 @@ foreach ($roles as $r) {
     ];
 }
 $roles_json = json_encode($roles_for_js, JSON_UNESCAPED_UNICODE);
+
+/* -----------------------------
+   Minimal blocks renderer
+   - Does not modify DB or migrate
+   - Safely checks for community_blocks table
+   - For 'chat' blocks it reuses your private.php by embedding private.php?code=...
+   ----------------------------- */
+
+function render_community_blocks($pdo, $community_id, $channels, $general, $me_id, $is_owner, $is_admin) {
+    // check table exists
+    $has = (bool)$pdo->query("SHOW TABLES LIKE 'community_blocks'")->fetchColumn();
+    if (!$has) return ''; // nothing to show safely
+
+    // fetch visible blocks for this community
+    try {
+        $st = $pdo->prepare("SELECT * FROM community_blocks WHERE community_id = ? AND visible = 1 ORDER BY position ASC, id ASC");
+        $st->execute([$community_id]);
+        $blocks = $st->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        return ''; // safe fail
+    }
+    if (empty($blocks)) return '';
+
+    // build quick channel-code map for lookup
+    $channelCodes = [];
+    foreach ($channels as $ch) {
+        if (!empty($ch['code'])) $channelCodes[$ch['code']] = $ch;
+    }
+
+    $html = "<div class='blocksArea' style='margin-top:12px'>\n";
+    foreach ($blocks as $b) {
+        $type = strtolower($b['block_type'] ?? '');
+        $cfg = [];
+        if (!empty($b['config_json'])) {
+            $cfg = json_decode($b['config_json'], true) ?: [];
+        }
+        $blockTitle = htmlspecialchars($b['code'] ?: ($b['block_type'] ?? 'block'));
+        // For chat block: reuse the existing channel functionality by embedding private.php?code=...
+        if ($type === 'chat') {
+            // try: 1) config.room_code, 2) config.room_id -> find code, 3) block code matching channel code, 4) default general
+            $room_code = null;
+            if (!empty($cfg['room_code'])) {
+                $room_code = $cfg['room_code'];
+            } elseif (!empty($cfg['room_id'])) {
+                // try to find code by id
+                try {
+                    $s = $pdo->prepare("SELECT code FROM private_rooms WHERE id = ? LIMIT 1");
+                    $s->execute([ (int)$cfg['room_id'] ]);
+                    $rc = $s->fetchColumn();
+                    if ($rc) $room_code = $rc;
+                } catch (Exception $e) {}
+            } elseif (isset($channelCodes[$b['code']])) {
+                $room_code = $b['code'];
+            } elseif (!empty($general['code'])) {
+                $room_code = $general['code'];
+            }
+            if (!$room_code) {
+                // nothing we can safely do
+                $html .= "<div class='block chat-block' style='padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:10px'><strong>{$blockTitle}</strong><div class='small' style='margin-top:6px;color:#bfc9d9'>No room configured</div></div>\n";
+            } else {
+                $safeCode = rawurlencode($room_code);
+                $html .= "<div class='block chat-block' style='padding:8px;border-radius:10px;background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent);margin-bottom:10px'>";
+                $html .= "<div style='display:flex;justify-content:space-between;align-items:center;padding:6px 8px'><strong>{$blockTitle}</strong><span class='small'>chat block — room: ".htmlspecialchars($room_code)."</span></div>";
+                // iframe (same origin) - uses existing private.php so all access/owner logic remains intact
+                $html .= "<div style='height:360px;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.03)'>";
+                $html .= "<iframe src='private.php?code={$safeCode}' style='border:0;width:100%;height:100%;min-height:360px'></iframe>";
+                $html .= "</div></div>\n";
+            }
+        } elseif ($type === 'voice') {
+            $html .= "<div class='block voice-block' style='padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:10px'><strong>{$blockTitle}</strong>";
+            $html .= "<div class='small' style='margin-top:6px;color:#bfc9d9'>Voice block (placeholder). Config: ".htmlspecialchars(json_encode($cfg))."</div>";
+            $html .= "<div style='margin-top:8px'><button class='btn' onclick=\"alert('Join voice (placeholder)')\">Join Voice (placeholder)</button></div>";
+            $html .= "</div>\n";
+        } elseif ($type === 'voting' || $type === 'vote' || $type === 'poll') {
+            $topic = htmlspecialchars($cfg['topic'] ?? $b['code']);
+            $choices = is_array($cfg['choices'] ?? null) ? $cfg['choices'] : [];
+            $html .= "<div class='block voting-block' style='padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:10px'><strong>{$blockTitle}</strong>";
+            $html .= "<div class='small' style='margin-top:6px;color:#bfc9d9'>".($topic ? "Topic: {$topic}" : "Voting block")."</div>";
+            if (!empty($choices)) {
+                $html .= "<div style='margin-top:8px'>";
+                foreach ($choices as $ch) {
+                    $label = htmlspecialchars($ch);
+                    $html .= "<button class='btn' style='margin-right:8px;margin-bottom:6px' onclick=\"alert('Vote recorded (placeholder)')\">Vote: {$label}</button>";
+                }
+                $html .= "</div>";
+            } else {
+                $html .= "<div class='small' style='margin-top:8px;color:#bfc9d9'>No choices configured</div>";
+            }
+            $html .= "</div>\n";
+        } else {
+            // generic block stub
+            $html .= "<div class='block generic-block' style='padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:10px'><strong>{$blockTitle}</strong>";
+            $html .= "<div class='small' style='margin-top:6px;color:#bfc9d9'>Type: ".htmlspecialchars($b['block_type'])." — Config: ".htmlspecialchars($b['config_json'] ?? '')."</div>";
+            $html .= "</div>\n";
+        }
+    }
+    $html .= "</div>\n";
+    return $html;
+}
 
 ?>
 <!doctype html>
@@ -264,6 +374,7 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
 .rolePill{display:inline-block;padding:6px 8px;border-radius:8px;margin-right:6px;margin-bottom:6px;color:#000}
 .topActions{display:flex;gap:8px;align-items:center}
 .toggleBtn{background:transparent;font-size:28px;border:1px solid rgba(255,255,255,0.03);padding:6px 8px;border-radius:8px;color:var(--muted);cursor:pointer}
+.blocksArea{margin-top:12px}
 @media (max-width:900px){ .side{display:none} }
     
 /* notification bell (room-style additions) */
@@ -330,9 +441,9 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
 
     <div style="font-weight:800;margin-bottom:8px">Channels</div>
     <div id="channelsList">
-      <?php if (empty($channels)): ?>
+      <?php if (empty($visible_channels)): ?>
         <div class="small">No channels yet</div>
-      <?php else: foreach($channels as $ch):
+      <?php else: foreach($visible_channels as $ch):
             $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
       ?>
         <div class="channelItem <?= $can ? '' : 'locked' ?>" data-code="<?= htmlspecialchars($ch['code']) ?>" data-locked="<?= $can ? '0' : '1' ?>" data-required-role="<?= (int)$ch['required_role_id'] ?>">
@@ -370,6 +481,14 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
       <?php else: ?>
         <div style="padding:24px;color:var(--muted)">You do not currently have access to any channels in this community.</div>
       <?php endif; ?>
+    </div>
+
+    <!-- BLOCKS: render any blocks for this community (non-destructive, uses existing private.php for chat blocks) -->
+    <div id="blocksContainer" style="margin-top:12px">
+      <?php
+        // safe render: uses helper function above
+        echo render_community_blocks($pdo, $community_id, $channels, $general, $me_id, $is_owner, $is_admin);
+      ?>
     </div>
   </section>
 </div>
@@ -779,32 +898,6 @@ markAllBtn.addEventListener('click', async (e)=>{
 
 document.addEventListener('click', (e)=> { if (!e.target.closest || (!e.target.closest('#notifBell') && !e.target.closest('#notifDropdown'))) toggleNotifDropdown(false); });
 
-async function startNotifPolling() {
-  try {
-    const j = await fetchNotifications(5);
-    lastUnread = j.unread_count || 0;
-    if (lastUnread > 0) { notifBadge.style.display = 'inline-block'; notifBadge.textContent = lastUnread > 99 ? '99+' : String(lastUnread); }
-    else notifBadge.style.display='none';
-  } catch (e) { console.error('initial notifications', e); }
-
-  polling = setInterval(async ()=> {
-    try {
-      const j = await fetchNotifications(5);
-      if (!j) return;
-      const unreadNow = j.unread_count || 0;
-      if (unreadNow > (lastUnread || 0)) {
-        try { if (audioUnlocked) { bell2.currentTime = 0; bell2.play().catch(()=>{}); } } catch(e){}
-      } else if (unreadNow > 0 && lastUnread === 0) {
-        try { if (audioUnlocked) { bell.currentTime = 0; bell.play().catch(()=>{}); } } catch(e){}
-      }
-      lastUnread = unreadNow;
-      if (lastUnread > 0) { notifBadge.style.display = 'inline-block'; notifBadge.textContent = lastUnread > 99 ? '99+' : String(lastUnread); }
-      else notifBadge.style.display='none';
-      if (notifDropdown.style.display === 'block') await loadNotifications(true);
-    } catch (e) { console.error('poll', e); }
-  }, POLL_INTERVAL);
-}
-    
 async function startNotifPolling() {
   try {
     const j = await fetchNotifications(5);
