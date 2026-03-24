@@ -600,7 +600,8 @@ CREATE TABLE `private_rooms` (
   `community_id` int(11) DEFAULT NULL,
   `required_role_id` int(11) DEFAULT NULL,
   `category_id` int(11) DEFAULT NULL,
-  `is_hidden` tinyint(1) DEFAULT 0
+  `is_hidden` tinyint(1) DEFAULT 0,
+  `is_voice` tinyint(1) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC;
 
 --
