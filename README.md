@@ -99,8 +99,8 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 - [x] Detect owner/admin/moderator (no more id, just select one of your servers)
 - [x] Role Hierarchy
 - [x] User Interface polish
-- [ ] Role creation colour wheel
-- [ ] Working audit log
+- [x] Role creation colour wheel
+- [x] Working audit log
 - [ ] Role hierarchy safeguards
 - [ ] Customisable moderation
 - [ ] Moderation and Interaction Bots
@@ -136,8 +136,8 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 - [x] Assign Permissions
 - [x] Role Assignment
 - [x] Ban permissions
-- [ ] Hidden Channel access
-- [ ] View-lock Access
+- [x] Hidden Channel access
+- [ x View-lock Access
 - [ ] Unquarantine
 - [ ] Edit Category permissions (Who can edit in categories)
 - [ ] Send-lock Access
