@@ -1,6 +1,6 @@
 <?php
-// mobile_community.php - mobile-optimized community view with a larger iframe area,
-// thumb-friendly channel drawer, and support for text / voice / hidden rooms.
+// mobile_community.php - mobile-optimized community view with swipe channel switching,
+// larger iframe area, and support for text / voice / hidden rooms.
 
 require "config.php";
 
@@ -310,6 +310,11 @@ button,input,select{font:inherit}
   gap:10px;
 }
 
+.currentBar{
+  transition: transform .14s ease;
+  will-change: transform;
+}
+    
 .backBtn,.iconBtn,.pillBtn,.ghost,.btn{
   border:0;
   border-radius:12px;
@@ -426,6 +431,8 @@ button,input,select{font:inherit}
   border-radius:14px;
   background:rgba(255,255,255,0.03);
   border:1px solid rgba(255,255,255,0.03);
+  touch-action:pan-y;
+  user-select:none;
 }
 .currentBar .left{
   min-width:0;
@@ -716,10 +723,10 @@ button,input,select{font:inherit}
 
   <div class="mainShell">
     <section class="viewer">
-      <div class="currentBar">
+      <div class="currentBar" id="currentBar">
         <div class="left">
           <div class="roomName" id="currentRoomName"><?= e($selected_code ? ($general['name'] ?? 'Room') : 'No channel selected') ?></div>
-          <div class="roomMeta" id="currentRoomMeta">Tap channels to switch rooms</div>
+          <div class="roomMeta" id="currentRoomMeta">Swipe here to change channel</div>
         </div>
         <div class="roomBtnRow">
           <button id="openChannelsBtn2" class="pillBtn">Channels</button>
@@ -728,7 +735,7 @@ button,input,select{font:inherit}
 
       <div class="iframeWrap" id="iframeWrap" aria-live="polite">
         <?php if (!empty($selected_code)): ?>
-          <iframe id="chatFrame" src="<?= ($selected_kind === 'voice') ? 'mobile_private.php?code=' . rawurlencode($selected_code) : 'mobile_private.php?code=' . rawurlencode($selected_code) ?>" allow="clipboard-write"></iframe>
+          <iframe id="chatFrame" src="<?= ($selected_kind === 'voice') ? 'private_voice.php?code=' . rawurlencode($selected_code) : 'mobile_private.php?code=' . rawurlencode($selected_code) ?>" allow="clipboard-write"></iframe>
         <?php else: ?>
           <div style="padding:20px;color:var(--muted)">You do not currently have access to any channels in this community.</div>
         <?php endif; ?>
@@ -907,6 +914,7 @@ const adminBtn = document.getElementById('adminBtn');
 const backBtn = document.getElementById('backBtn');
 const currentRoomName = document.getElementById('currentRoomName');
 const currentRoomMeta = document.getElementById('currentRoomMeta');
+const currentBar = document.getElementById('currentBar');
 const newChannelForm = document.getElementById('newChannelForm');
 
 function escapeHtml(s){ if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -928,7 +936,7 @@ closeSheetBtn?.addEventListener('click', closeSheet);
 sheetOverlay?.addEventListener('click', closeSheet);
 
 backBtn.addEventListener('click', ()=> {
-  location.href = 'room.php';
+  location.href = 'mobile_room.php';
 });
 adminBtn?.addEventListener('click', ()=> {
   location.href = 'community_admin.php?public_id=' + encodeURIComponent(COMMUNITY_PUBLIC_ID);
@@ -939,13 +947,25 @@ function setCurrentRoom(label, meta) {
   if (currentRoomMeta) currentRoomMeta.textContent = meta || '';
 }
 
+function roomSrcFor(code, kind) {
+  return (kind === 'voice')
+    ? ('private_voice.php?code=' + encodeURIComponent(code))
+    : ('mobile_private.php?code=' + encodeURIComponent(code));
+}
+
+function getVisibleRoomItems() {
+  return Array.from(document.querySelectorAll('.roomItem'))
+    .filter(el => el.offsetParent !== null && !el.classList.contains('disabled'));
+}
+
 function loadRoom(code, kind, name, hidden, locked) {
   if (!code) return;
   if (locked === '1') {
     alert('You do not have permission to view this channel.');
     return;
   }
-  const src = 'mobile_private.php?code=' + encodeURIComponent(code);
+
+  const src = roomSrcFor(code, kind);
   if (chatFrame) chatFrame.src = src;
   else {
     const ifr = document.createElement('iframe');
@@ -972,6 +992,26 @@ function loadRoom(code, kind, name, hidden, locked) {
   closeSheet();
 }
 
+function nextRoom(delta) {
+  const rooms = getVisibleRoomItems();
+  if (!rooms.length) return;
+
+  const active = document.querySelector('.roomItem.active');
+  let idx = rooms.findIndex(el => el === active);
+  if (idx < 0) idx = 0;
+
+  const next = rooms[(idx + delta + rooms.length) % rooms.length];
+  if (!next) return;
+
+  loadRoom(
+    next.dataset.code,
+    next.dataset.kind || 'text',
+    next.querySelector('.name')?.textContent?.trim() || 'Channel',
+    next.dataset.hidden || '0',
+    next.dataset.locked || '0'
+  );
+}
+
 function wireRoomClicks() {
   document.querySelectorAll('.roomItem').forEach(el => {
     el.addEventListener('click', ()=> {
@@ -992,6 +1032,72 @@ channelSearch?.addEventListener('input', ()=> {
     const name = (el.dataset.name || '').toLowerCase();
     el.style.display = (!q || name.includes(q)) ? '' : 'none';
   });
+});
+
+// swipe on the current room bar to move to the next/previous channel
+let barTouchStartX = 0;
+let barTouchStartY = 0;
+let barTouchLastX = 0;
+let barSwipeActive = false;
+
+function setBarSwipeOffset(dx) {
+  if (!currentBar) return;
+  // small, damped movement so it feels like a hint rather than a full drag
+  const limited = Math.max(-22, Math.min(22, dx * 0.18));
+  currentBar.style.transform = `translateX(${limited}px)`;
+}
+
+function resetBarSwipeOffset() {
+  if (!currentBar) return;
+  currentBar.style.transform = '';
+}
+
+currentBar?.addEventListener('touchstart', (e) => {
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  barTouchStartX = t.clientX;
+  barTouchStartY = t.clientY;
+  barTouchLastX = t.clientX;
+  barSwipeActive = true;
+}, { passive: true });
+
+currentBar?.addEventListener('touchmove', (e) => {
+  if (!barSwipeActive) return;
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+
+  barTouchLastX = t.clientX;
+  const dx = barTouchLastX - barTouchStartX;
+  const dy = t.clientY - barTouchStartY;
+
+  // only show the hint if it's more horizontal than vertical
+  if (Math.abs(dx) > Math.abs(dy)) {
+    setBarSwipeOffset(dx);
+  }
+}, { passive: true });
+
+currentBar?.addEventListener('touchend', (e) => {
+  if (!barSwipeActive) return;
+  const t = e.changedTouches && e.changedTouches[0];
+  barSwipeActive = false;
+
+  resetBarSwipeOffset();
+
+  if (!t) return;
+
+  const dx = t.clientX - barTouchStartX;
+  const dy = t.clientY - barTouchStartY;
+
+  if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy)) return;
+
+  // swipe left = next room, swipe right = previous room
+  if (dx < 0) nextRoom(1);
+  else nextRoom(-1);
+});
+
+currentBar?.addEventListener('touchcancel', () => {
+  barSwipeActive = false;
+  resetBarSwipeOffset();
 });
 
 if (newChannelForm) {
@@ -1091,7 +1197,6 @@ document.addEventListener('click', (e)=> {
   }
 })();
 
-// tap outside sheets
 window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') closeSheet(); });
 </script>
 </body>
