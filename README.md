@@ -27,9 +27,9 @@ For more information, visit my odoo website: https://motylo.odoo.com/
 - [x] We don’t need username on every message
 - [x] Lots of pings
 - [x] Fix notif bell in room/message
-- [ ] Swipe on a message to reply
+- [x] Swipe on a message to reply
 - [ ] Remove notif on scroll
-- [ ] Remove private.php bar in community.php
+- [x] Remove private.php bar in community.php
 - [ ] Scrollable friends column 
 - [ ] All the private.php changes
 ## Simple Features
