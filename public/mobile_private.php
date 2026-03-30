@@ -99,8 +99,14 @@ html,body{height:100%;margin:0;background:var(--bg);-webkit-font-smoothing:antia
   line-height:1.45;
   word-break:break-word;
 }
-.content big{font-size:1.25em;line-height:1.15}
-.content small{font-size:.8em;line-height:1.15}
+.content big{
+  font-size:1.9em;
+  line-height:1.05;
+}
+.content small{
+  font-size:.8em;
+  line-height:1.15;
+}
 .content b, .content strong{font-weight:800}
 .content i, .content em{font-style:italic}
 .content u{text-decoration:underline}
@@ -121,6 +127,19 @@ html,body{height:100%;margin:0;background:var(--bg);-webkit-font-smoothing:antia
 }
 .content a{color:#8ab4ff;text-decoration:underline}
 .content img{max-width:100%;height:auto}
+.content .emojiBig{
+  font-size:4em;
+  line-height:1;
+  display:inline-block;
+  vertical-align:-0.12em;
+}
+.msg{
+  display:flex;
+  gap:8px;
+  margin-bottom:12px;
+  align-items:flex-start;
+  touch-action:pan-y;
+}
 
 /* spacer to align when avatar hidden */
 .avatarSpacer { width:44px; height:44px; flex:0 0 44px; }
@@ -298,6 +317,54 @@ function safeUrl(raw){
 }
 function escapeAttr(s){ return escapeHtml(s).replace(/`/g,'&#096;'); }
 
+function decorateEmojis(root){
+  if (!root) return;
+
+  let emojiRe;
+  try {
+    emojiRe = new RegExp('[\\u{1F300}-\\u{1FAFF}\\u{1F1E6}-\\u{1F1FF}\\u{2600}-\\u{27BF}]', 'gu');
+  } catch (e) {
+    return;
+  }
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  for (const node of nodes) {
+    const text = node.nodeValue || '';
+    const parent = node.parentElement;
+    if (parent && parent.closest('code, pre')) continue;
+
+    emojiRe.lastIndex = 0;
+    if (!emojiRe.test(text)) continue;
+    emojiRe.lastIndex = 0;
+
+    const frag = document.createDocumentFragment();
+    let lastIndex = 0;
+    let match;
+
+    while ((match = emojiRe.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+      }
+
+      const span = document.createElement('span');
+      span.className = 'emojiBig';
+      span.textContent = match[0];
+      frag.appendChild(span);
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < text.length) {
+      frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+
+    node.parentNode.replaceChild(frag, node);
+  }
+}    
+    
 function sanitizeAndFormatHtml(input){
   if (!input) return '';
   let text = String(input);
@@ -412,12 +479,15 @@ function buildMessageDom(m, showAvatar){
     const content = document.createElement('div');
     content.className = 'content';
     content.innerHTML = sanitizeAndFormatHtml(m.message || '');
+    decorateEmojis(content);
+
     content.querySelectorAll('img.msgImage').forEach(img => {
       img.addEventListener('click', (ev) => {
         ev.stopPropagation();
         openImageModal(img.src);
       });
     });
+
     bubble.appendChild(content);
   }
 
@@ -450,10 +520,6 @@ function buildMessageDom(m, showAvatar){
     if (m.user_id === MY_ID) { row.appendChild(bubble); row.appendChild(spacer); }
     else { row.appendChild(spacer); row.appendChild(bubble); }
   }
-
-  row.addEventListener('click', (ev)=> {
-    if (ev.target.closest('.bubble')) setReplyFromRow(row);
-  });
 
   return row;
 }
@@ -752,11 +818,6 @@ function showActionMenuForRow(row, clientX, clientY){
   const id = row.dataset.id || '';
   actionMenu.innerHTML = '';
 
-  const replyBtn = document.createElement('button');
-  replyBtn.textContent = 'Reply';
-  replyBtn.addEventListener('click', ()=> { setReplyFromRow(row); hideActionMenu(); });
-  actionMenu.appendChild(replyBtn);
-
   if (String(uid) === String(MY_ID)) {
     const editBtn = document.createElement('button');
     editBtn.textContent = 'Edit';
@@ -800,6 +861,68 @@ function hideActionMenu(){
   actionMenu.style.display = 'none';
   actionMenu.setAttribute('aria-hidden','true');
 }
+    
+let swipeReplyState = null;
+const SWIPE_REPLY_THRESHOLD = 48;
+const SWIPE_REPLY_FEEDBACK = 28;
+
+function resetSwipeReply(row){
+  if (!row) return;
+  row.style.transform = '';
+  row.style.transition = '';
+}
+
+chatEl.addEventListener('touchstart', (ev) => {
+  const row = ev.target.closest('.msg');
+  if (!row) return;
+
+  const t = ev.touches && ev.touches[0];
+  if (!t) return;
+
+  swipeReplyState = {
+    row,
+    startX: t.clientX,
+    startY: t.clientY,
+    activated: false
+  };
+
+  row.style.transition = 'transform .12s ease';
+}, { passive:true });
+
+chatEl.addEventListener('touchmove', (ev) => {
+  if (!swipeReplyState || !swipeReplyState.row) return;
+
+  const t = ev.touches && ev.touches[0];
+  if (!t) return;
+
+  const dx = t.clientX - swipeReplyState.startX;
+  const dy = t.clientY - swipeReplyState.startY;
+
+  if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 14) {
+    resetSwipeReply(swipeReplyState.row);
+    swipeReplyState = null;
+    return;
+  }
+
+  const limited = Math.max(-SWIPE_REPLY_FEEDBACK, Math.min(SWIPE_REPLY_FEEDBACK, dx * 0.2));
+  swipeReplyState.row.style.transform = `translateX(${limited}px)`;
+
+  if (!swipeReplyState.activated && Math.abs(dx) > SWIPE_REPLY_THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
+    swipeReplyState.activated = true;
+    setReplyFromRow(swipeReplyState.row);
+    if (navigator.vibrate) navigator.vibrate(10);
+  }
+}, { passive:true });
+
+chatEl.addEventListener('touchend', () => {
+  if (swipeReplyState?.row) resetSwipeReply(swipeReplyState.row);
+  swipeReplyState = null;
+}, { passive:true });
+
+chatEl.addEventListener('touchcancel', () => {
+  if (swipeReplyState?.row) resetSwipeReply(swipeReplyState.row);
+  swipeReplyState = null;
+}, { passive:true });
 
 chatEl.addEventListener('touchstart', (ev)=>{
   const row = ev.target.closest('.msg');
