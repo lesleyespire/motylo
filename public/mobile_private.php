@@ -128,7 +128,7 @@ html,body{height:100%;margin:0;background:var(--bg);-webkit-font-smoothing:antia
 .content a{color:#8ab4ff;text-decoration:underline}
 .content img{max-width:100%;height:auto}
 .content .emojiBig{
-  font-size:4em;
+  font-size:3em;
   line-height:1;
   display:inline-block;
   vertical-align:-0.12em;
