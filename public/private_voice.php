@@ -1,8 +1,7 @@
 <?php
-// voice.php
+// private_voice.php
 require "config.php";
 
-// must be logged in
 if (empty($_COOKIE["auth_token"])) {
     header("Location:index.php");
     exit;
@@ -17,28 +16,121 @@ if (!$user) {
 }
 
 $myId = (int)$user['id'];
-$myName = htmlspecialchars($user['username'], ENT_QUOTES, 'UTF-8');
+$myNameRaw = (string)$user['username'];
+$myName = htmlspecialchars($myNameRaw, ENT_QUOTES, 'UTF-8');
 $myAvatar = $user['avatar'] ?? null;
-$room = preg_replace('/[^A-Za-z0-9_-]/', '', ($_GET['room'] ?? 'main'));
 
-// require Pusher config in config.php: $pusher_app_key, $pusher_app_cluster
+// accept code, fallback to room for backwards compatibility, but never default to "main"
+$roomCode = preg_replace('/[^A-Za-z0-9_-]/', '', (string)($_GET['code'] ?? ($_GET['room'] ?? '')));
+if ($roomCode === '') {
+    die("No voice code provided.");
+}
+
+function ensure_voice_presence_table(PDO $pdo): void {
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS voice_room_presence (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            room_code VARCHAR(128) NOT NULL,
+            user_id INT NOT NULL,
+            username VARCHAR(255) DEFAULT NULL,
+            last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY room_user (room_code, user_id),
+            KEY idx_room_seen (room_code, last_seen)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    } catch (Exception $e) {
+        // ignore
+    }
+}
+
+function cleanup_voice_presence(PDO $pdo, int $olderThanSeconds = 45): void {
+    try {
+        $pdo->exec("DELETE FROM voice_room_presence WHERE last_seen < (NOW() - INTERVAL " . (int)$olderThanSeconds . " SECOND)");
+    } catch (Exception $e) {
+        // ignore
+    }
+}
+
+function touch_voice_presence(PDO $pdo, string $roomCode, int $userId, string $username, bool $leave = false): void {
+    ensure_voice_presence_table($pdo);
+    cleanup_voice_presence($pdo, 45);
+
+    if ($leave) {
+        try {
+            $q = $pdo->prepare("DELETE FROM voice_room_presence WHERE room_code = ? AND user_id = ?");
+            $q->execute([$roomCode, $userId]);
+        } catch (Exception $e) {
+            // ignore
+        }
+        return;
+    }
+
+    try {
+        $q = $pdo->prepare("INSERT INTO voice_room_presence (room_code, user_id, username, last_seen)
+                            VALUES (?, ?, ?, NOW())
+                            ON DUPLICATE KEY UPDATE username = VALUES(username), last_seen = NOW()");
+        $q->execute([$roomCode, $userId, $username]);
+    } catch (Exception $e) {
+        // ignore
+    }
+}
+
+function room_presence_count(PDO $pdo, string $roomCode): int {
+    ensure_voice_presence_table($pdo);
+    cleanup_voice_presence($pdo, 45);
+    try {
+        $q = $pdo->prepare("SELECT COUNT(*) FROM voice_room_presence WHERE room_code = ? AND last_seen >= (NOW() - INTERVAL 45 SECOND)");
+        $q->execute([$roomCode]);
+        return (int)$q->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+// validate room exists and is a voice room
+$stmt = $pdo->prepare("SELECT id, code, name, is_voice FROM private_rooms WHERE code = ? LIMIT 1");
+$stmt->execute([$roomCode]);
+$room = $stmt->fetch(PDO::FETCH_ASSOC);
+if (!$room || empty($room['is_voice'])) {
+    die("Invalid voice code.");
+}
+
+$roomName = (string)($room['name'] ?? 'Voice');
+$roomPresenceCount = room_presence_count($pdo, $roomCode);
+
+// small AJAX helpers for presence heartbeats from the client
+if (($_GET['mode'] ?? '') === 'heartbeat') {
+    header('Content-Type: application/json; charset=utf-8');
+    touch_voice_presence($pdo, $roomCode, $myId, $myNameRaw, false);
+    echo json_encode([
+        'ok' => true,
+        'count' => room_presence_count($pdo, $roomCode)
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if (($_GET['mode'] ?? '') === 'leave') {
+    header('Content-Type: application/json; charset=utf-8');
+    touch_voice_presence($pdo, $roomCode, $myId, $myNameRaw, true);
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 ?>
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Voice Chat</title>
+<title>Voice Chat — <?= htmlspecialchars($roomCode, ENT_QUOTES, 'UTF-8') ?></title>
 <link rel="icon" href="root/favicon.ico">
 <style>
 :root{--bg:#0e0e0e;--panel:#181818;--accent:#5865F2}
 body{margin:0;background:var(--bg);color:#fff;font-family:Inter,Arial,sans-serif}
 #top{display:flex;align-items:center;padding:12px;background:var(--panel);border-bottom:1px solid #222}
-.headerAvatar{width:80px;height:80px;border-radius:50%;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--accent);font-weight:700;font-size:34px}
-.headerInfo{margin-left:12px}
+.headerAvatar{width:80px;height:80px;border-radius:50%;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--accent);font-weight:700;font-size:34px;flex:0 0 80px}
+.headerAvatar img{width:100%;height:100%;object-fit:cover}
+.headerInfo{margin-left:12px;min-width:0}
 .headerInfo strong{display:block;font-size:18px}
 .controls{margin-left:auto;display:flex;gap:8px;align-items:center}
 .btn{background:var(--accent);color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer}
-.grid{display:flex;flex-wrap:wrap;gap:20px;padding:20px}
+.grid{display:flex;flex-wrap:wrap;gap:20px;padding:20px;padding-bottom:120px}
 .tile{width:180px;text-align:center}
 .tile .avatar{width:160px;height:160px;border-radius:50%;background:#222;margin:0 auto;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
 .tile .avatar img{width:100%;height:100%;object-fit:cover}
@@ -51,7 +143,22 @@ body{margin:0;background:var(--bg);color:#fff;font-family:Inter,Arial,sans-serif
 .volumeMeter{height:8px;width:180px;background:#222;border-radius:4px;overflow:hidden}
 .volumeFill{height:100%;width:0;background:linear-gradient(90deg,#0f0,#ff0);transition:width .05s}
 .small{font-size:13px;color:#cfcfcf}
-.debug{position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.5);padding:8px;border-radius:8px;font-size:12px}
+.debug{position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.5);padding:8px;border-radius:8px;font-size:12px;max-width:320px;white-space:pre-wrap}
+.connectedBadge{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  margin-top:6px;
+  padding:5px 10px;
+  border-radius:999px;
+  background:rgba(76,217,100,0.12);
+  color:#d8ffe0;
+  font-size:12px;
+  font-weight:700;
+}
+.connectedBadge .dot{
+  width:8px;height:8px;border-radius:999px;background:#4cd964;box-shadow:0 0 0 4px rgba(76,217,100,0.12);
+}
 </style>
 
 <script src="https://js.pusher.com/8.2/pusher.min.js"></script>
@@ -59,13 +166,20 @@ body{margin:0;background:var(--bg);color:#fff;font-family:Inter,Arial,sans-serif
 <body>
 
 <div id="top">
-    <div class="headerAvatar"><?php if($myAvatar): ?><img src="avatars/<?= htmlspecialchars($myAvatar) ?>"><?php else: ?><?= strtoupper($myName[0]) ?><?php endif; ?></div>
-    <div class="headerInfo">
-        <strong>Voice Room — <?= htmlspecialchars($room) ?></strong>
-        <span class="small">You: <b><?= $myName ?></b> — room: <code><?= htmlspecialchars($room) ?></code></span>
+    <div class="headerAvatar">
+        <?php if ($myAvatar): ?>
+            <img src="avatars/<?= htmlspecialchars($myAvatar, ENT_QUOTES, 'UTF-8') ?>" alt="">
+        <?php else: ?>
+            <?= strtoupper(substr($myNameRaw, 0, 1)) ?>
+        <?php endif; ?>
     </div>
-    <div class="controls">
-        <button id="leaveBtn" class="btn">Leave</button>
+    <div class="headerInfo">
+        <strong>Voice Room — <?= htmlspecialchars($roomCode, ENT_QUOTES, 'UTF-8') ?></strong>
+        <span class="small">You: <b><?= $myName ?></b> — code: <code><?= htmlspecialchars($roomCode, ENT_QUOTES, 'UTF-8') ?></code></span>
+        <div id="connectedBadge" class="connectedBadge" style="display:inline-flex">
+            <span class="dot"></span>
+            <span id="connectedText"><?= (int)$roomPresenceCount ?> connected</span>
+        </div>
     </div>
 </div>
 
@@ -85,10 +199,11 @@ body{margin:0;background:var(--bg);color:#fff;font-family:Inter,Arial,sans-serif
 <script>
 const PUSHER_KEY = <?= json_encode($pusher_app_key ?? '') ?>;
 const PUSHER_CLUSTER = <?= json_encode($pusher_app_cluster ?? '') ?>;
-const CHANNEL = "presence-voice-<?= addslashes($room) ?>";
+const CHANNEL = "presence-voice-<?= addslashes($roomCode) ?>";
 const MY_ID = <?= json_encode((string)$myId) ?>;
-const MY_NAME = <?= json_encode($myName) ?>;
+const MY_NAME = <?= json_encode($myNameRaw) ?>;
 const MY_AVATAR = <?= json_encode($myAvatar) ?>;
+const ROOM_CODE = <?= json_encode($roomCode) ?>;
 
 if(!PUSHER_KEY || !PUSHER_CLUSTER){
     alert("Pusher config missing in config.php");
@@ -104,24 +219,25 @@ const channel = pusher.subscribe(CHANNEL);
 
 const peersEl = document.getElementById('peers');
 const debugEl = document.getElementById('debug');
+const connectedText = document.getElementById('connectedText');
 
 const muteBtn = document.getElementById('muteBtn');
 const unmuteBtn = document.getElementById('unmuteBtn');
 const leaveBtn = document.getElementById('leaveBtn');
 const localLevelFill = document.getElementById('localLevel');
 
-/* WebRTC state */
-const pcs = new Map(); // peerId -> RTCPeerConnection
-const remoteAudio = new Map(); // peerId -> audio element
-const tiles = new Map(); // peerId -> tile element
-const tracksAdded = new Map(); // peerId -> bool (whether local tracks were already added to that pc)
+const pcs = new Map();
+const remoteAudio = new Map();
+const tiles = new Map();
+const tracksAdded = new Map();
 let localStream = null;
 let audioCtx = null;
 let analyser = null;
 let startedLocalPromise = null;
 let audioUnlocked = false;
+let heartbeatTimer = null;
+let localPresenceSent = false;
 
-/* debug helper */
 function dbg(msg){
     console.debug(msg);
     if(location.search.includes('debug')) {
@@ -130,7 +246,21 @@ function dbg(msg){
     }
 }
 
-/* Create UI tile */
+function updateConnectedCount(n){
+    if (connectedText) connectedText.textContent = `${n} connected`;
+}
+
+function sendPresenceHeartbeat(leave=false){
+    try {
+        const url = 'private_voice.php?code=' + encodeURIComponent(ROOM_CODE) + '&mode=' + (leave ? 'leave' : 'heartbeat');
+        if (navigator.sendBeacon) {
+            navigator.sendBeacon(url, '');
+        } else {
+            fetch(url, { method:'GET', credentials:'same-origin', keepalive:true }).catch(()=>{});
+        }
+    } catch (e) {}
+}
+
 function createTile(id, info){
     if(tiles.has(id)) return;
     const tile = document.createElement('div');
@@ -140,15 +270,20 @@ function createTile(id, info){
     const avwrap = document.createElement('div');
     avwrap.className = 'avatar';
     if(info && info.avatar){
-        const img = document.createElement('img'); img.src = 'avatars/' + info.avatar; avwrap.appendChild(img);
+        const img = document.createElement('img');
+        img.src = 'avatars/' + info.avatar;
+        avwrap.appendChild(img);
     } else {
         avwrap.textContent = (info && info.username) ? info.username.charAt(0).toUpperCase() : '?';
         avwrap.style.fontSize = '64px';
     }
-    const micInd = document.createElement('div'); micInd.className = 'mic-ind';
+    const micInd = document.createElement('div');
+    micInd.className = 'mic-ind';
     avwrap.appendChild(micInd);
 
-    const nameEl = document.createElement('div'); nameEl.className='username'; nameEl.textContent=(info && info.username)?info.username:'Unknown';
+    const nameEl = document.createElement('div');
+    nameEl.className='username';
+    nameEl.textContent=(info && info.username)?info.username:'Unknown';
 
     tile.appendChild(avwrap);
     tile.appendChild(nameEl);
@@ -156,26 +291,22 @@ function createTile(id, info){
     tiles.set(id, tile);
 }
 
-/* remove tile */
 function removeTile(id){
     const t = tiles.get(id);
     if(t){ t.remove(); tiles.delete(id); }
 }
 
-/* set speaking class */
 function setSpeaking(id, yes){
     const t = tiles.get(id);
     if(!t) return;
     if(yes) t.classList.add('speaking'); else t.classList.remove('speaking');
 }
 
-/* ensure local media - returns a promise we can await */
 async function ensureLocalStream(){
     if(startedLocalPromise) return startedLocalPromise;
     startedLocalPromise = (async ()=>{
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            // create analyser for local level
             try {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 const src = audioCtx.createMediaStreamSource(localStream);
@@ -194,7 +325,6 @@ async function ensureLocalStream(){
                 }
                 tick();
             } catch(e){ console.warn('analyser failed', e); }
-            // add to existing PCs
             for(const [peerId, pc] of pcs.entries()){
                 if(!tracksAdded.get(peerId)){
                     for(const t of localStream.getTracks()) pc.addTrack(t, localStream);
@@ -203,6 +333,12 @@ async function ensureLocalStream(){
             }
             audioUnlocked = true;
             dbg('local stream obtained');
+            if (!localPresenceSent) {
+                sendPresenceHeartbeat(false);
+                localPresenceSent = true;
+                if (heartbeatTimer) clearInterval(heartbeatTimer);
+                heartbeatTimer = setInterval(()=> sendPresenceHeartbeat(false), 12000);
+            }
             return localStream;
         } catch (e){
             dbg('getUserMedia failed: ' + (e && e.message));
@@ -212,12 +348,10 @@ async function ensureLocalStream(){
     return startedLocalPromise;
 }
 
-/* create RTCPeerConnection for a peer id */
 function getOrCreatePC(peerId){
     if(pcs.has(peerId)) return pcs.get(peerId);
     const pc = new RTCPeerConnection({ iceServers:[{urls:'stun:stun.l.google.com:19302'}] });
 
-    // on track
     pc.ontrack = ev => {
         let audio = remoteAudio.get(peerId);
         if(!audio){
@@ -228,7 +362,6 @@ function getOrCreatePC(peerId){
             document.body.appendChild(audio);
             remoteAudio.set(peerId, audio);
 
-            // option: create analyser for remote to show speaking indicator
             try {
                 const ctx = new (window.AudioContext || window.webkitAudioContext)();
                 const src = ctx.createMediaElementSource(audio);
@@ -251,7 +384,6 @@ function getOrCreatePC(peerId){
         audio.srcObject = ev.streams[0];
     };
 
-    // ICE -> forward to remote via pusher client event
     pc.onicecandidate = e => {
         if(e.candidate){
             channel.trigger('client-signal', {
@@ -266,7 +398,6 @@ function getOrCreatePC(peerId){
     pc.onconnectionstatechange = ()=> {
         dbg(`pc ${peerId} state ${pc.connectionState}`);
         if(pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected'){
-            // cleanup
             try { pc.close(); } catch(e){}
             pcs.delete(peerId);
             tracksAdded.delete(peerId);
@@ -281,12 +412,10 @@ function getOrCreatePC(peerId){
     return pc;
 }
 
-/* Create offer to peer (only called when we decide we should be initiator) */
 async function createOfferTo(peerId){
     try {
         await ensureLocalStream();
         const pc = getOrCreatePC(peerId);
-        // add local tracks if not added
         if(!tracksAdded.get(peerId)){
             for(const t of localStream.getTracks()) pc.addTrack(t, localStream);
             tracksAdded.set(peerId, true);
@@ -305,7 +434,6 @@ async function createOfferTo(peerId){
     }
 }
 
-/* Handle incoming client-signal */
 async function handleClientSignal(payload){
     try {
         if(!payload || (String(payload.to) !== String(MY_ID))) return;
@@ -318,9 +446,7 @@ async function handleClientSignal(payload){
             if(!desc) return;
             const sdpType = desc.type;
             if(sdpType === 'offer'){
-                // ensure local stream, add tracks, then setRemote and answer
                 await ensureLocalStream();
-                // add local tracks if not added
                 if(!tracksAdded.get(from)){
                     for(const t of localStream.getTracks()) pc.addTrack(t, localStream);
                     tracksAdded.set(from, true);
@@ -353,21 +479,25 @@ async function handleClientSignal(payload){
     }
 }
 
-/* Pusher presence handlers */
 channel.bind('pusher:subscription_succeeded', members => {
     dbg('subscription_succeeded');
+    let count = 0;
     members.each(member => {
         const id = String(member.id);
         const info = member.info || {};
         createTile(id, info);
+        count++;
     });
-    // After listing members, create offers to appropriate peers
+    updateConnectedCount(count);
+    sendPresenceHeartbeat(false);
+    localPresenceSent = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(()=> sendPresenceHeartbeat(false), 12000);
+
     members.each(member => {
         const id = String(member.id);
         if(id === MY_ID) return;
-        // deterministic initiator: smaller numeric id initiates
         if(Number(MY_ID) < Number(id)){
-            // ensure local stream and then create offer
             createOfferTo(id).catch(e=>dbg('offer error:' + e));
         }
     });
@@ -377,15 +507,19 @@ channel.bind('pusher:member_added', member => {
     const id = String(member.id);
     const info = member.info || {};
     createTile(id, info);
-    // if I'm smaller numeric id, create offer
+    const current = peersEl.querySelectorAll('.tile').length;
+    updateConnectedCount(current);
     if(Number(MY_ID) < Number(id)){
         createOfferTo(id).catch(e=>dbg('offer error:' + e));
+    }
+    if (!localPresenceSent) {
+        sendPresenceHeartbeat(false);
+        localPresenceSent = true;
     }
 });
 
 channel.bind('pusher:member_removed', member => {
     const id = String(member.id);
-    // cleanup pc + audio + tile
     if(pcs.has(id)){
         try { pcs.get(id).close(); } catch(e){}
         pcs.delete(id);
@@ -394,47 +528,48 @@ channel.bind('pusher:member_removed', member => {
         remoteAudio.get(id).remove(); remoteAudio.delete(id);
     }
     removeTile(id);
+    const current = peersEl.querySelectorAll('.tile').length;
+    updateConnectedCount(current);
 });
 
-/* client events for signaling */
 channel.bind('client-signal', data => {
-    // data: {from,to,type,description? , candidate?}
     handleClientSignal(data);
 });
 
-/* UI: leave */
 leaveBtn.addEventListener('click', ()=> {
-    // close all pc, remove tiles, unsubscribe
+    try { sendPresenceHeartbeat(true); } catch(e){}
     for(const [id, pc] of pcs.entries()){ try { pc.close(); } catch(e){} }
     for(const el of remoteAudio.values()) try { el.remove(); } catch(e){}
     pcs.clear(); remoteAudio.clear();
-    pusher.unsubscribe(CHANNEL);
+    try { pusher.unsubscribe(CHANNEL); } catch(e){}
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     location.href = 'room.php';
 });
 
-/* Start local audio on first gesture (browsers require gesture) */
 document.addEventListener('pointerdown', ()=> {
     ensureLocalStream().catch(e=>dbg('permission error: ' + (e && e.message)));
 }, { once:true });
 
-/* mute/unmute */
 muteBtn.addEventListener('click', ()=>{
     if(!localStream) return;
     localStream.getAudioTracks().forEach(t => t.enabled = false);
-    muteBtn.style.display = 'none'; unmuteBtn.style.display = '';
+    muteBtn.style.display = 'none';
+    unmuteBtn.style.display = '';
 });
 unmuteBtn.addEventListener('click', ()=>{
     if(!localStream) return;
     localStream.getAudioTracks().forEach(t => t.enabled = true);
-    muteBtn.style.display = ''; unmuteBtn.style.display = 'none';
+    muteBtn.style.display = '';
+    unmuteBtn.style.display = 'none';
 });
 
-/* pusher connection debugging */
 pusher.connection.bind('state_change', s=>dbg('pusher state: ' + JSON.stringify(s)));
 pusher.connection.bind('error', e=>dbg('pusher error: ' + JSON.stringify(e)));
 
+window.addEventListener('beforeunload', ()=> {
+    try { sendPresenceHeartbeat(true); } catch(e){}
+});
 dbg('voice script loaded. My ID: ' + MY_ID);
-
 </script>
 </body>
 </html>
