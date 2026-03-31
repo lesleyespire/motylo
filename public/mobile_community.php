@@ -1457,6 +1457,116 @@ window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') closeSheet();
 window.addEventListener('beforeunload', ()=> { if (voicePollTimer) clearInterval(voicePollTimer); });
 
 startVoicePolling().catch(()=>{});
+    
+function getIframeDoc() {
+  const ifr = document.getElementById('chatFrame');
+  if (!ifr) return null;
+  try { return ifr.contentDocument || ifr.contentWindow.document; }
+  catch (e) { return null; }
+}
+
+function openInTop(href) {
+  if (!href) return;
+  try {
+    window.top.location.href = href;
+  } catch (e) {
+    window.location.href = href;
+  }
+}
+
+function enhanceIframeElements() {
+  const doc = getIframeDoc();
+  if (!doc) return;
+
+  try {
+    const anchors = doc.querySelectorAll('a[href]');
+    anchors.forEach(a => {
+      try {
+        const rawHref = a.getAttribute('href');
+        if (!rawHref) return;
+
+        // Make the browser prefer top-level navigation.
+        a.setAttribute('target', '_top');
+        a.setAttribute('rel', 'noopener noreferrer');
+
+        // Resolve relative links against the iframe document.
+        let resolvedHref = rawHref;
+        try {
+          resolvedHref = new URL(rawHref, doc.baseURI).href;
+        } catch (e) {}
+
+        // Keep the anchor clickable, but force top-level navigation.
+        a.addEventListener('click', (ev) => {
+          const href = a.getAttribute('href');
+          if (!href) return;
+          if (href.startsWith('javascript:')) return;
+
+          ev.preventDefault();
+          ev.stopPropagation();
+          openInTop(resolvedHref || href);
+        }, true);
+      } catch (e) {}
+    });
+
+    // Catch any link clicks that still slip through.
+    doc.addEventListener('click', (ev) => {
+      const a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
+      if (!a) return;
+
+      const href = a.getAttribute('href');
+      if (!href || href.startsWith('javascript:')) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      let resolvedHref = href;
+      try {
+        resolvedHref = new URL(href, doc.baseURI).href;
+      } catch (e) {}
+
+      openInTop(resolvedHref);
+    }, true);
+
+    // Optional: keep form submissions in the top window too.
+    doc.addEventListener('submit', (ev) => {
+      const form = ev.target;
+      if (!form || !form.getAttribute) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      const action = form.getAttribute('action') || doc.baseURI;
+      let resolvedAction = action;
+      try {
+        resolvedAction = new URL(action, doc.baseURI).href;
+      } catch (e) {}
+
+      openInTop(resolvedAction);
+    }, true);
+
+  } catch (err) {
+    console.warn('enhanceIframeElements failed', err);
+  }
+}
+
+function enhanceIframeOnceLoaded() {
+  const ifr = document.getElementById('chatFrame');
+  if (!ifr) return;
+
+  ifr.addEventListener('load', () => {
+    setTimeout(enhanceIframeElements, 50);
+  });
+
+  setTimeout(enhanceIframeElements, 50);
+}
+
+(function initEnhancements(){
+  enhanceIframeOnceLoaded();
+  new MutationObserver(() => {
+    enhanceIframeOnceLoaded();
+  }).observe(document.getElementById('iframeWrap'), { childList: true, subtree: false });
+})();   
+    
 </script>
 </body>
 </html>
