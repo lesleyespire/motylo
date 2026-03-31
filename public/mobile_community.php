@@ -4,7 +4,9 @@
 
 require "config.php";
 
-// --- auth ---
+/* ----------------------------
+   auth
+---------------------------- */
 if (empty($_COOKIE['auth_token'])) { header("Location:index.php"); exit; }
 $stmt = $pdo->prepare("SELECT id, username, avatar FROM users WHERE auth_token = ?");
 $stmt->execute([$_COOKIE['auth_token']]);
@@ -13,11 +15,12 @@ if (!$me) { header("Location:index.php"); exit; }
 $me_id = (int)$me['id'];
 $me_username = $me['username'];
 
-// identify community by public_id or internal id
+/* ----------------------------
+   identify community
+---------------------------- */
 $public_id = trim((string)($_GET['public_id'] ?? ''));
 $internal_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 
-// fetch community
 $community = null;
 if ($public_id !== '') {
     $st = $pdo->prepare("SELECT * FROM communities WHERE public_id = ? LIMIT 1");
@@ -31,7 +34,133 @@ if ($public_id !== '') {
 if (!$community) { die("Community not found."); }
 $community_id = (int)$community['id'];
 
-// Ensure private_rooms has required columns
+/* ----------------------------
+   helpers
+---------------------------- */
+function e($s) {
+    return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+}
+
+function ensure_voice_presence_table(PDO $pdo): void {
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS voice_room_presence (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            room_code VARCHAR(128) NOT NULL,
+            user_id INT NOT NULL,
+            username VARCHAR(255) DEFAULT NULL,
+            last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY room_user (room_code, user_id),
+            KEY idx_room_seen (room_code, last_seen)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    } catch (Exception $e) {
+        // ignore
+    }
+}
+
+function cleanup_voice_presence(PDO $pdo, int $olderThanSeconds = 45): void {
+    try {
+        $pdo->exec("DELETE FROM voice_room_presence WHERE last_seen < (NOW() - INTERVAL " . (int)$olderThanSeconds . " SECOND)");
+    } catch (Exception $e) {
+        // ignore
+    }
+}
+
+function get_voice_counts(PDO $pdo, array $roomCodes): array {
+    ensure_voice_presence_table($pdo);
+    cleanup_voice_presence($pdo, 45);
+
+    $counts = [];
+    $roomCodes = array_values(array_filter(array_map('strval', $roomCodes), fn($v) => $v !== ''));
+    if (empty($roomCodes)) return $counts;
+
+    $placeholders = implode(',', array_fill(0, count($roomCodes), '?'));
+    try {
+        $q = $pdo->prepare("SELECT room_code, COUNT(*) AS c
+                            FROM voice_room_presence
+                            WHERE room_code IN ($placeholders)
+                              AND last_seen >= (NOW() - INTERVAL 45 SECOND)
+                            GROUP BY room_code");
+        $q->execute($roomCodes);
+        while ($row = $q->fetch(PDO::FETCH_ASSOC)) {
+            $counts[(string)$row['room_code']] = (int)$row['c'];
+        }
+    } catch (Exception $e) {
+        // ignore
+    }
+
+    foreach ($roomCodes as $code) {
+        if (!isset($counts[$code])) $counts[$code] = 0;
+    }
+    return $counts;
+}
+
+function is_comm_admin_local(PDO $pdo, int $community_id, int $user_id): bool {
+    $s = $pdo->prepare("SELECT owner_id FROM communities WHERE id = ? LIMIT 1");
+    $s->execute([$community_id]);
+    $r = $s->fetch(PDO::FETCH_ASSOC);
+    if (!$r) return false;
+    if ((int)$r['owner_id'] === (int)$user_id) return true;
+
+    $hasTable = (bool)$pdo->query("SHOW TABLES LIKE 'community_member_roles'")->fetchColumn();
+    if ($hasTable) {
+        $q = $pdo->prepare("SELECT 1
+                            FROM community_member_roles mr
+                            JOIN community_roles cr ON cr.id = mr.role_id
+                            WHERE mr.community_id = ? AND mr.user_id = ? AND cr.is_admin = 1
+                            LIMIT 1");
+        $q->execute([$community_id, $user_id]);
+        if ($q->fetchColumn()) return true;
+    } else {
+        $s2 = $pdo->prepare("SELECT cr.is_admin
+                             FROM community_members cm
+                             JOIN community_roles cr ON cr.id = cm.role_id
+                             WHERE cm.community_id = ? AND cm.user_id = ?
+                             LIMIT 1");
+        $s2->execute([$community_id, $user_id]);
+        return (bool)$s2->fetchColumn();
+    }
+    return false;
+}
+
+function user_can_view_channel($channel_required_role_id, $me_id, $community_id, PDO $pdo, $is_owner, $is_admin): bool {
+    if ($channel_required_role_id === null || $channel_required_role_id === 0) return true;
+    if ($is_owner) return true;
+    if ($is_admin) return true;
+
+    try {
+        $hasTable = (bool)$pdo->query("SHOW TABLES LIKE 'community_member_roles'")->fetchColumn();
+        if ($hasTable) {
+            $q = $pdo->prepare("SELECT 1
+                                FROM community_member_roles mr
+                                JOIN community_roles cr ON cr.id = mr.role_id
+                                WHERE mr.community_id = ? AND mr.user_id = ? AND cr.can_view_locked = 1
+                                LIMIT 1");
+            $q->execute([$community_id, $me_id]);
+            if ($q->fetchColumn()) return true;
+
+            $q2 = $pdo->prepare("SELECT 1
+                                 FROM community_member_roles
+                                 WHERE community_id = ? AND user_id = ? AND role_id = ?
+                                 LIMIT 1");
+            $q2->execute([$community_id, $me_id, (int)$channel_required_role_id]);
+            if ($q2->fetchColumn()) return true;
+        } else {
+            $q = $pdo->prepare("SELECT cr.can_view_locked, cm.role_id
+                                FROM community_members cm
+                                LEFT JOIN community_roles cr ON cr.id = cm.role_id
+                                WHERE cm.community_id = ? AND cm.user_id = ?
+                                LIMIT 1");
+            $q->execute([$community_id, $me_id]);
+            $r = $q->fetch(PDO::FETCH_ASSOC);
+            if ($r && (!empty($r['can_view_locked']) || (int)$r['role_id'] === (int)$channel_required_role_id)) return true;
+        }
+    } catch (Exception $e) {}
+    return false;
+}
+
+/* ----------------------------
+   ensure private_rooms schema
+---------------------------- */
 try {
     $cols = $pdo->query("SHOW COLUMNS FROM private_rooms")->fetchAll(PDO::FETCH_COLUMN);
     $cols_l = array_map('strtolower', $cols);
@@ -49,17 +178,18 @@ try {
     }
 } catch (Exception $e) { /* ignore */ }
 
-// ensure there is a general room
+/* ----------------------------
+   ensure general room
+---------------------------- */
 try {
     $s = $pdo->prepare("SELECT id, code, name FROM private_rooms WHERE community_id = ? AND name = 'general' LIMIT 1");
     $s->execute([$community_id]);
     $general = $s->fetch(PDO::FETCH_ASSOC);
     if (!$general) {
-        $code = 'c' . substr(md5($community['public_id'] . time() . random_int(1,99999)),0,10);
+        $code = 'c' . substr(md5($community['public_id'] . time() . random_int(1,99999)), 0, 10);
         $ins = $pdo->prepare("INSERT INTO private_rooms (code, name, community_id) VALUES (?, 'general', ?)");
         $ins->execute([$code, $community_id]);
-        $general_id = (int)$pdo->lastInsertId();
-        $general = ['id'=>$general_id, 'code'=>$code, 'name'=>'general'];
+        $general = ['id' => (int)$pdo->lastInsertId(), 'code' => $code, 'name' => 'general'];
     }
 } catch (Exception $e) {
     try {
@@ -77,18 +207,19 @@ try {
         $s->execute([$community_id]);
         $general = $s->fetch(PDO::FETCH_ASSOC);
         if (!$general) {
-            $code = 'c' . substr(md5($community['public_id'] . time() . random_int(1,99999)),0,10);
+            $code = 'c' . substr(md5($community['public_id'] . time() . random_int(1,99999)), 0, 10);
             $ins = $pdo->prepare("INSERT INTO private_rooms (code, name, community_id) VALUES (?, 'general', ?)");
             $ins->execute([$code, $community_id]);
-            $general_id = (int)$pdo->lastInsertId();
-            $general = ['id'=>$general_id, 'code'=>$code, 'name'=>'general'];
+            $general = ['id' => (int)$pdo->lastInsertId(), 'code' => $code, 'name' => 'general'];
         }
     } catch (Exception $ex) {
         die("Failed to ensure general room: " . htmlspecialchars($ex->getMessage()));
     }
 }
 
-// Load channels
+/* ----------------------------
+   channels
+---------------------------- */
 $channels = [];
 try {
     $s = $pdo->prepare("SELECT id, code, name, required_role_id, is_hidden, is_voice FROM private_rooms WHERE community_id = ? ORDER BY id ASC");
@@ -96,7 +227,6 @@ try {
     $channels = $s->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) { $channels = []; }
 
-// split into groups for display
 $regular_channels = [];
 $voice_channels = [];
 $hidden_channels = [];
@@ -110,7 +240,9 @@ foreach ($channels as $ch) {
     }
 }
 
-// load community roles
+/* ----------------------------
+   roles
+---------------------------- */
 $roles = [];
 $roleMap = [];
 try {
@@ -123,7 +255,9 @@ try {
     }
 } catch (Exception $e) { $roles = []; $roleMap = []; }
 
-// fetch current member roles (supporting multiple roles: community_member_roles)
+/* ----------------------------
+   user roles
+---------------------------- */
 $user_roles_for_me = [];
 try {
     $mr = $pdo->query("SHOW TABLES LIKE 'community_member_roles'")->fetchAll(PDO::FETCH_COLUMN);
@@ -136,63 +270,28 @@ try {
         $mstmt = $pdo->prepare("SELECT role_id FROM community_members WHERE community_id = ? AND user_id = ? LIMIT 1");
         $mstmt->execute([$community_id, $me_id]);
         $rid = $mstmt->fetchColumn();
-        if ($rid) $user_roles_for_me = [ (int)$rid ];
+        if ($rid) $user_roles_for_me = [(int)$rid];
     }
 } catch (Exception $e) { $user_roles_for_me = []; }
 
-// admin/owner check
-function is_comm_admin_local($pdo, $community_id, $user_id) {
-    $s = $pdo->prepare("SELECT owner_id FROM communities WHERE id = ? LIMIT 1");
-    $s->execute([$community_id]);
-    $r = $s->fetch(PDO::FETCH_ASSOC);
-    if (!$r) return false;
-    if ((int)$r['owner_id'] === (int)$user_id) return true;
-    $hasTable = (bool)$pdo->query("SHOW TABLES LIKE 'community_member_roles'")->fetchColumn();
-    if ($hasTable) {
-        $q = $pdo->prepare("SELECT 1 FROM community_member_roles mr JOIN community_roles cr ON cr.id = mr.role_id WHERE mr.community_id = ? AND mr.user_id = ? AND cr.is_admin = 1 LIMIT 1");
-        $q->execute([$community_id, $user_id]);
-        if ($q->fetchColumn()) return true;
-    } else {
-        $s2 = $pdo->prepare("SELECT cr.is_admin FROM community_members cm JOIN community_roles cr ON cr.id = cm.role_id WHERE cm.community_id = ? AND cm.user_id = ? LIMIT 1");
-        $s2->execute([$community_id, $user_id]);
-        $v = $s2->fetchColumn();
-        return (bool)$v;
-    }
-    return false;
-}
+/* ----------------------------
+   permissions
+---------------------------- */
 $is_admin = is_comm_admin_local($pdo, $community_id, $me_id);
 $is_owner = ((int)$community['owner_id'] === $me_id);
 
-// permission helper
-function user_can_view_channel($channel_required_role_id, $me_id, $community_id, $pdo, $is_owner, $is_admin) {
-    if ($channel_required_role_id === null || $channel_required_role_id === 0) return true;
-    if ($is_owner) return true;
-    if ($is_admin) return true;
-    try {
-        $hasTable = (bool)$pdo->query("SHOW TABLES LIKE 'community_member_roles'")->fetchColumn();
-        if ($hasTable) {
-            $q = $pdo->prepare("SELECT 1 FROM community_member_roles mr JOIN community_roles cr ON cr.id = mr.role_id WHERE mr.community_id = ? AND mr.user_id = ? AND cr.can_view_locked = 1 LIMIT 1");
-            $q->execute([$community_id, $me_id]);
-            if ($q->fetchColumn()) return true;
-            $q2 = $pdo->prepare("SELECT 1 FROM community_member_roles WHERE community_id = ? AND user_id = ? AND role_id = ? LIMIT 1");
-            $q2->execute([$community_id, $me_id, (int)$channel_required_role_id]);
-            if ($q2->fetchColumn()) return true;
-        } else {
-            $q = $pdo->prepare("SELECT cr.can_view_locked, cm.role_id FROM community_members cm LEFT JOIN community_roles cr ON cr.id = cm.role_id WHERE cm.community_id = ? AND cm.user_id = ? LIMIT 1");
-            $q->execute([$community_id, $me_id]);
-            $r = $q->fetch(PDO::FETCH_ASSOC);
-            if ($r && (!empty($r['can_view_locked']) || intval($r['role_id']) === intval($channel_required_role_id))) return true;
-        }
-    } catch (Exception $e) {}
-    return false;
-}
-
-// decide accessible channels and selection
+/* ----------------------------
+   accessible rooms
+---------------------------- */
 $accessible_codes = [];
 $selected_code = $_GET['code'] ?? ($general['code'] ?? null);
 $selected_kind = 'text';
 $default_text_choice = null;
 $default_voice_choice = null;
+
+$accessible_voice_codes = [];
+$accessible_voice_rooms = [];
+$visible_hidden_channels = [];
 
 foreach ($regular_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
@@ -205,18 +304,23 @@ foreach ($voice_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
     if ($can) {
         $accessible_codes[] = $ch['code'];
+        $accessible_voice_codes[] = $ch['code'];
+        $accessible_voice_rooms[] = $ch;
         if ($default_voice_choice === null) $default_voice_choice = $ch['code'];
     }
 }
-
-// hidden rooms are only shown if actually accessible
-$visible_hidden_channels = [];
 foreach ($hidden_channels as $ch) {
     $can = user_can_view_channel($ch['required_role_id'], $me_id, $community_id, $pdo, $is_owner, $is_admin);
     if ($can) {
         $accessible_codes[] = $ch['code'];
         $visible_hidden_channels[] = $ch;
-        if ($default_text_choice === null) $default_text_choice = $ch['code'];
+        if (!empty($ch['is_voice'])) {
+            $accessible_voice_codes[] = $ch['code'];
+            $accessible_voice_rooms[] = $ch;
+            if ($default_voice_choice === null) $default_voice_choice = $ch['code'];
+        } else {
+            if ($default_text_choice === null) $default_text_choice = $ch['code'];
+        }
     }
 }
 
@@ -226,7 +330,6 @@ if ($selected_code && !in_array($selected_code, $accessible_codes, true)) {
 if (!$selected_code) {
     $selected_code = $default_text_choice ?: $default_voice_choice;
 }
-
 if ($selected_code) {
     foreach ($voice_channels as $vc) {
         if ((string)$vc['code'] === (string)$selected_code) {
@@ -234,9 +337,34 @@ if ($selected_code) {
             break;
         }
     }
+    if ($selected_kind !== 'voice') {
+        foreach ($visible_hidden_channels as $vh) {
+            if (!empty($vh['is_voice']) && (string)$vh['code'] === (string)$selected_code) {
+                $selected_kind = 'voice';
+                break;
+            }
+        }
+    }
 }
 
-// prepare roles JSON for JS
+/* ----------------------------
+   JSON route: voice counts
+---------------------------- */
+if (($_GET['action'] ?? '') === 'voice_counts') {
+    header('Content-Type: application/json; charset=utf-8');
+    $counts = get_voice_counts($pdo, $accessible_voice_codes);
+    echo json_encode([
+        'ok' => true,
+        'counts' => $counts,
+        'selected_code' => $selected_code,
+        'selected_kind' => $selected_kind,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* ----------------------------
+   JS data
+---------------------------- */
 $roles_for_js = [];
 foreach ($roles as $r) {
     $roles_for_js[] = [
@@ -250,10 +378,13 @@ foreach ($roles as $r) {
 $roles_json = json_encode($roles_for_js, JSON_UNESCAPED_UNICODE);
 $user_roles_json = json_encode(array_values($user_roles_for_me), JSON_UNESCAPED_UNICODE);
 $channels_json = json_encode($channels, JSON_UNESCAPED_UNICODE);
+$accessible_voice_codes_json = json_encode(array_values($accessible_voice_codes), JSON_UNESCAPED_UNICODE);
+$selected_code_json = json_encode($selected_code ?: '');
+$selected_kind_json = json_encode($selected_kind ?: 'text');
 
-function e($s) {
-    return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
-}
+/* ----------------------------
+   output
+---------------------------- */
 ?>
 <!doctype html>
 <html>
@@ -314,7 +445,7 @@ button,input,select{font:inherit}
   transition: transform .14s ease;
   will-change: transform;
 }
-    
+
 .backBtn,.iconBtn,.pillBtn,.ghost,.btn{
   border:0;
   border-radius:12px;
@@ -597,6 +728,27 @@ button,input,select{font:inherit}
   cursor:not-allowed;
 }
 
+.channelItem .voiceStatus{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  color:var(--muted);
+  font-size:12px;
+}
+
+.voiceDot{
+  width:8px;
+  height:8px;
+  border-radius:999px;
+  background:#4cd964;
+  box-shadow:0 0 0 4px rgba(76,217,100,0.12);
+  display:inline-block;
+}
+.voiceDot.off{
+  background:#667085;
+  box-shadow:none;
+}
+
 .formCard{
   padding:12px;
   border-radius:16px;
@@ -671,6 +823,25 @@ button,input,select{font:inherit}
 .notifMsg{
   color:var(--muted);
   font-size:13px;
+}
+
+.voiceLiveBadge{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:5px 10px;
+  border-radius:999px;
+  background:rgba(76,217,100,0.12);
+  color:#d8ffe0;
+  font-size:12px;
+  font-weight:700;
+}
+.voiceLiveBadge .dot{
+  width:8px;
+  height:8px;
+  border-radius:999px;
+  background:#4cd964;
+  box-shadow:0 0 0 4px rgba(76,217,100,0.12);
 }
 
 @media (min-width:900px){
@@ -799,7 +970,12 @@ button,input,select{font:inherit}
                  data-voice="1"
                  data-locked="<?= $can ? '0' : '1' ?>">
               <div class="name"><?= e($ch['name']) ?></div>
-              <div class="meta"><?= $ch['required_role_id'] ? 'Locked' : 'Public' ?></div>
+              <div class="meta">
+                <span class="voiceStatus">
+                  <span class="voiceDot <?= $active ? '' : 'off' ?>"></span>
+                  <span class="voiceCountLabel">Loading…</span>
+                </span>
+              </div>
             </div>
           <?php endforeach; ?>
         </div>
@@ -824,7 +1000,16 @@ button,input,select{font:inherit}
                  data-voice="<?= $isVoice ? '1' : '0' ?>"
                  data-locked="<?= $can ? '0' : '1' ?>">
               <div class="name"><?= e($ch['name']) ?></div>
-              <div class="meta"><?= $isVoice ? 'Hidden voice' : 'Hidden' ?><?= $ch['required_role_id'] ? ' · Locked' : '' ?></div>
+              <div class="meta">
+                <span class="voiceStatus">
+                  <?php if ($isVoice): ?>
+                    <span class="voiceDot <?= $active ? '' : 'off' ?>"></span>
+                    <span class="voiceCountLabel">Loading…</span>
+                  <?php else: ?>
+                    <span>Hidden<?= $ch['required_role_id'] ? ' · Locked' : '' ?></span>
+                  <?php endif; ?>
+                </span>
+              </div>
             </div>
           <?php endforeach; ?>
         </div>
@@ -898,6 +1083,9 @@ const ROLES = <?= $roles_json ?>;
 const USER_ROLES_ME = <?= $user_roles_json ?>;
 const CHANNELS = <?= $channels_json ?>;
 const COMMUNITY_PUBLIC_ID = <?= json_encode($community['public_id'] ?? '') ?>;
+const ACCESSIBLE_VOICE_CODES = <?= $accessible_voice_codes_json ?>;
+const INITIAL_SELECTED_CODE = <?= $selected_code_json ?>;
+const INITIAL_SELECTED_KIND = <?= $selected_kind_json ?>;
 
 const sheet = document.getElementById('sheet');
 const sheetOverlay = document.getElementById('sheetOverlay');
@@ -916,6 +1104,9 @@ const currentRoomName = document.getElementById('currentRoomName');
 const currentRoomMeta = document.getElementById('currentRoomMeta');
 const currentBar = document.getElementById('currentBar');
 const newChannelForm = document.getElementById('newChannelForm');
+
+let voiceCounts = {};
+let voicePollTimer = null;
 
 function escapeHtml(s){ if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -958,6 +1149,63 @@ function getVisibleRoomItems() {
     .filter(el => el.offsetParent !== null && !el.classList.contains('disabled'));
 }
 
+function applyVoiceCountToRow(el, count) {
+  const label = el.querySelector('.voiceCountLabel');
+  const dot = el.querySelector('.voiceDot');
+  if (!label || !dot) return;
+  dot.classList.toggle('off', !(count > 0));
+  label.textContent = count > 0 ? `${count} connected` : 'Empty';
+}
+
+function updateVoiceDrawerLabels() {
+  document.querySelectorAll('.roomItem[data-voice="1"]').forEach(el => {
+    const code = el.dataset.code;
+    const count = Number(voiceCounts[code] || 0);
+    applyVoiceCountToRow(el, count);
+  });
+
+  if (INITIAL_SELECTED_KIND === 'voice' && INITIAL_SELECTED_CODE) {
+    const c = Number(voiceCounts[INITIAL_SELECTED_CODE] || 0);
+    if (currentRoomMeta) {
+      currentRoomMeta.innerHTML = `
+        <span class="voiceLiveBadge">
+          <span class="dot"></span>
+          <span>${escapeHtml(c > 0 ? `${c} connected` : 'Connecting…')}</span>
+        </span>
+      `;
+    }
+  }
+
+  const active = document.querySelector('.roomItem.active[data-voice="1"]');
+  if (active) {
+    const code = active.dataset.code;
+    const c = Number(voiceCounts[code] || 0);
+    const barMeta = document.getElementById('currentRoomMeta');
+    if (barMeta && active.classList.contains('active')) {
+      barMeta.innerHTML = `
+        <span class="voiceLiveBadge">
+          <span class="dot"></span>
+          <span>${escapeHtml(c > 0 ? `${c} connected` : 'No one else connected')}</span>
+        </span>
+      `;
+    }
+  }
+}
+
+async function fetchVoiceCounts() {
+  try {
+    const url = 'mobile_community.php?public_id=' + encodeURIComponent(COMMUNITY_PUBLIC_ID) + '&action=voice_counts';
+    const r = await fetch(url, { credentials:'same-origin' });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j || !j.ok || !j.counts) return;
+    voiceCounts = j.counts || {};
+    updateVoiceDrawerLabels();
+  } catch (e) {
+    // ignore
+  }
+}
+
 function loadRoom(code, kind, name, hidden, locked) {
   if (!code) return;
   if (locked === '1') {
@@ -983,13 +1231,24 @@ function loadRoom(code, kind, name, hidden, locked) {
   const target = document.querySelector(`.roomItem[data-code="${CSS.escape(code)}"]`);
   if (target) target.classList.add('active');
 
-  setCurrentRoom(
-    name || 'Channel',
-    kind === 'voice'
-      ? (hidden === '1' ? 'Hidden voice chat' : 'Voice chat')
-      : (hidden === '1' ? 'Hidden room' : 'Text room')
-  );
+  if (kind === 'voice') {
+    setCurrentRoom(
+      name || 'Voice chat',
+      hidden === '1'
+        ? 'Hidden voice chat'
+        : 'Loading live count…'
+    );
+  } else {
+    setCurrentRoom(
+      name || 'Channel',
+      hidden === '1'
+        ? 'Hidden room'
+        : 'Text room'
+    );
+  }
+
   closeSheet();
+  updateVoiceDrawerLabels();
 }
 
 function nextRoom(delta) {
@@ -1037,16 +1296,13 @@ channelSearch?.addEventListener('input', ()=> {
 // swipe on the current room bar to move to the next/previous channel
 let barTouchStartX = 0;
 let barTouchStartY = 0;
-let barTouchLastX = 0;
 let barSwipeActive = false;
 
 function setBarSwipeOffset(dx) {
   if (!currentBar) return;
-  // small, damped movement so it feels like a hint rather than a full drag
   const limited = Math.max(-22, Math.min(22, dx * 0.18));
   currentBar.style.transform = `translateX(${limited}px)`;
 }
-
 function resetBarSwipeOffset() {
   if (!currentBar) return;
   currentBar.style.transform = '';
@@ -1057,7 +1313,6 @@ currentBar?.addEventListener('touchstart', (e) => {
   if (!t) return;
   barTouchStartX = t.clientX;
   barTouchStartY = t.clientY;
-  barTouchLastX = t.clientX;
   barSwipeActive = true;
 }, { passive: true });
 
@@ -1066,11 +1321,9 @@ currentBar?.addEventListener('touchmove', (e) => {
   const t = e.touches && e.touches[0];
   if (!t) return;
 
-  barTouchLastX = t.clientX;
-  const dx = barTouchLastX - barTouchStartX;
+  const dx = t.clientX - barTouchStartX;
   const dy = t.clientY - barTouchStartY;
 
-  // only show the hint if it's more horizontal than vertical
   if (Math.abs(dx) > Math.abs(dy)) {
     setBarSwipeOffset(dx);
   }
@@ -1080,7 +1333,6 @@ currentBar?.addEventListener('touchend', (e) => {
   if (!barSwipeActive) return;
   const t = e.changedTouches && e.changedTouches[0];
   barSwipeActive = false;
-
   resetBarSwipeOffset();
 
   if (!t) return;
@@ -1090,7 +1342,6 @@ currentBar?.addEventListener('touchend', (e) => {
 
   if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy)) return;
 
-  // swipe left = next room, swipe right = previous room
   if (dx < 0) nextRoom(1);
   else nextRoom(-1);
 });
@@ -1183,10 +1434,10 @@ document.addEventListener('click', (e)=> {
   }
 });
 
-// quick iframe load on initial selected room
+// initial load
 (function markInitial() {
-  const selected = <?= json_encode($selected_code ?: '') ?>;
-  const selectedKind = <?= json_encode($selected_kind ?: 'text') ?>;
+  const selected = INITIAL_SELECTED_CODE;
+  const selectedKind = INITIAL_SELECTED_KIND;
   if (selected) {
     const nameEl = document.querySelector(`.roomItem[data-code="${CSS.escape(selected)}"] .name`);
     const name = nameEl ? nameEl.textContent.trim() : 'Channel';
@@ -1197,7 +1448,15 @@ document.addEventListener('click', (e)=> {
   }
 })();
 
+async function startVoicePolling() {
+  await fetchVoiceCounts();
+  voicePollTimer = setInterval(fetchVoiceCounts, 12000);
+}
+
 window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') closeSheet(); });
+window.addEventListener('beforeunload', ()=> { if (voicePollTimer) clearInterval(voicePollTimer); });
+
+startVoicePolling().catch(()=>{});
 </script>
 </body>
 </html>
