@@ -156,6 +156,7 @@ body{margin:0;background:var(--bg);color:#eef2ff;font-family:Inter,Arial,Helveti
 .input,textarea{width:100%;padding:10px;border-radius:10px;border:0;background:#0d0d0f;color:#fff;box-sizing:border-box}
 .small{font-size:13px;color:var(--muted);margin-top:8px}
 .error{color:#f88}
+.toplinks{margin-top:35px}
 </style>
 </head>
 <body>
@@ -181,6 +182,14 @@ body{margin:0;background:var(--bg);color:#eef2ff;font-family:Inter,Arial,Helveti
       </div>
     </div>
   </div>
+  
+              <div class="toplinks">
+                <a class="btn ghost" href="mobile_room.php">← Back to rooms</a>
+                <?php if ($currentUser): ?>&nbsp;•&nbsp;<a class="btn ghost" href="mobile_user.php?username=<?= urlencode($currentUser['username']) ?>">My profile</a><?php endif; ?>
+                &nbsp;•&nbsp;
+            </div>
+        </div>
+
 
   <div class="bio"><?= nl2br(e($display_bio)) ?></div>
 
@@ -211,6 +220,5 @@ body{margin:0;background:var(--bg);color:#eef2ff;font-family:Inter,Arial,Helveti
   <?php else: ?>
     <div class="small">Profile (read-only)</div>
   <?php endif; ?>
-</div>
 </body>
 </html>
