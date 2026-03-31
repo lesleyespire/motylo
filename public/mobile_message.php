@@ -50,7 +50,7 @@ body{display:flex;flex-direction:column}
 .iconBtn,.ghostBtn,.pillBtn,.smallBtn,.sendBtn,.topBtn{
   border:0;border-radius:14px;color:var(--text);cursor:pointer
 }
-.iconBtn{width:42px;height:42px;background:rgba(255,255,255,.03);font-size:18px;position:relative;flex:0 0 auto}
+.iconBtn{width:42px;height:42px;background:rgba(255,255,255,.03);font-size:18px;position:relative;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;line-height:1}
 .badge{position:absolute;top:-6px;right:-6px;background:#ff4d4f;color:#fff;padding:3px 7px;border-radius:999px;font-size:12px;line-height:1}
 .titleWrap{min-width:0;display:flex;flex-direction:column;gap:2px}
 .pageTitle{font-weight:850;font-size:15px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:54vw}
@@ -125,6 +125,24 @@ body{display:flex;flex-direction:column}
 .sendBtn{background:linear-gradient(135deg,var(--accent),#7b89ff);padding:12px 14px;font-weight:800;min-height:46px}
 .smallBtn{background:rgba(255,255,255,.04);padding:12px 12px;min-height:46px;min-width:46px;font-size:18px}
 .charCount{font-size:12px;color:var(--muted);min-width:42px;text-align:right;padding-bottom:6px}
+
+.incomingCall{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;background:radial-gradient(circle at center, rgba(88,101,242,.18), rgba(4,6,10,.88) 55%, rgba(0,0,0,.96) 100%);backdrop-filter:blur(12px);animation:callBackdropIn .18s ease-out}
+.incomingCall::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg, rgba(88,101,242,.12), transparent 35%, rgba(255,77,79,.08));pointer-events:none}
+.incomingCard{position:relative;width:min(94vw, 460px);border-radius:28px;padding:20px 18px 18px;background:linear-gradient(180deg, rgba(20,24,34,.99), rgba(10,13,20,.99));border:1px solid rgba(255,255,255,.08);box-shadow:0 28px 100px rgba(0,0,0,.68);transform:translateY(0) scale(1);animation:callCardPop .18s ease-out}
+.incomingCard::after{content:'';position:absolute;inset:-8px;border-radius:34px;border:1px solid rgba(88,101,242,.22);box-shadow:0 0 0 8px rgba(88,101,242,.08);pointer-events:none;animation:callPulse 1.15s ease-out infinite}
+.incomingHead{display:flex;gap:14px;align-items:center}
+.incomingAvatar{width:68px;height:68px;border-radius:22px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#232a3d,#151a26);font-weight:900;font-size:26px;flex:0 0 68px;border:1px solid rgba(255,255,255,.06);box-shadow:0 0 0 10px rgba(88,101,242,.10)}
+.incomingAvatar img{width:100%;height:100%;object-fit:cover;display:block}
+.incomingTitle{font-weight:950;font-size:22px;line-height:1.1;letter-spacing:.01em}
+.incomingSub{margin-top:6px;color:#e6ecfb;font-size:15px;line-height:1.45}
+.incomingActions{display:flex;gap:10px;margin-top:18px}
+.incomingActions .pillBtn{flex:1;padding:14px 14px;font-weight:950;min-height:50px}
+.incomingActions .pillBtn.primary{background:linear-gradient(135deg,#5865F2,#7b89ff);box-shadow:0 12px 30px rgba(88,101,242,.28)}
+.incomingActions .pillBtn.ghost{background:rgba(255,255,255,.06)}
+.incomingHint{margin-top:12px;color:var(--muted);font-size:12px;text-align:center;line-height:1.4}
+@keyframes callBackdropIn{from{opacity:0}to{opacity:1}}
+@keyframes callCardPop{from{transform:translateY(12px) scale(.96);opacity:.2}to{transform:translateY(0) scale(1);opacity:1}}
+@keyframes callPulse{0%{transform:scale(1);opacity:.8}100%{transform:scale(1.08);opacity:0}}
 
 .typingBar{min-height:20px;padding:0 4px;color:var(--muted);font-size:13px}
 
@@ -229,8 +247,9 @@ body{display:flex;flex-direction:column}
       </div>
       <div class="composer">
         <textarea id="msg" maxlength="750" placeholder="Send a message…" rows="1"></textarea>
+        <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none">
         <div class="charCount" id="charCount">0/750</div>
-        <button class="smallBtn" id="emojiBtn" title="Emoji">😊</button>
+        <button class="smallBtn" id="imageBtn" title="Attach image">📷</button>
         <button class="sendBtn" id="sendBtn">Send</button>
       </div>
     </div>
@@ -282,12 +301,29 @@ body{display:flex;flex-direction:column}
     <div class="voiceTop">
       <button class="voiceClose" id="voiceCloseBtn">✖</button>
       <div class="info">
-        <strong>Voice with <?= e($target) ?></strong>
+        <strong id="voiceTitle">Voice with <?= e($target) ?></strong>
         <span id="voiceStatus">Connecting…</span>
       </div>
       <button class="pillBtn primary" id="voiceLeaveBtn" style="padding:10px 12px">Leave</button>
     </div>
     <iframe class="voiceFrame" id="voiceFrame" src="about:blank" allow="microphone; autoplay; clipboard-write"></iframe>
+  </div>
+</div>
+
+<div class="incomingCall" id="incomingCall" aria-hidden="true">
+  <div class="incomingCard">
+    <div class="incomingHead">
+      <div class="incomingAvatar" id="incomingAvatar"></div>
+      <div style="min-width:0;flex:1">
+        <div class="incomingTitle" id="incomingTitle">Incoming call</div>
+        <div class="incomingSub" id="incomingSub">Someone is calling…</div>
+      </div>
+    </div>
+    <div class="incomingActions">
+      <button class="pillBtn primary" id="incomingAcceptBtn">Accept</button>
+      <button class="pillBtn ghost" id="incomingDismissBtn">Dismiss</button>
+    </div>
+    <div class="incomingHint">This stays on screen until you choose. The call will ring again so it is hard to miss.</div>
   </div>
 </div>
 
@@ -300,13 +336,23 @@ body{display:flex;flex-direction:column}
 const TARGET = <?= json_encode($target) ?>;
 const MY_ID = <?= json_encode($me_id) ?>;
 const MY_USERNAME = <?= json_encode($me_username) ?>;
-const POLL_INTERVAL = 30000;
+const POLL_INTERVAL = 8000;
 const MAX_MESSAGE_LENGTH = 750;
 const NOTIF_API = 'notifications.php';
+const UPLOAD_API = 'upload_image.php';
 const SHEET = document.getElementById('sheet');
 const SHEET_OVERLAY = document.getElementById('sheetOverlay');
 const VOICE_MODAL = document.getElementById('voiceModal');
 const VOICE_FRAME = document.getElementById('voiceFrame');
+const VOICE_TITLE = document.getElementById('voiceTitle');
+const IMAGE_BTN = document.getElementById('imageBtn');
+const IMAGE_INPUT = document.getElementById('imageInput');
+const INCOMING_CALL = document.getElementById('incomingCall');
+const INCOMING_AVATAR = document.getElementById('incomingAvatar');
+const INCOMING_TITLE = document.getElementById('incomingTitle');
+const INCOMING_SUB = document.getElementById('incomingSub');
+const INCOMING_ACCEPT = document.getElementById('incomingAcceptBtn');
+const INCOMING_DISMISS = document.getElementById('incomingDismissBtn');
 
 const chatEl = document.getElementById('chat');
 const msgEl = document.getElementById('msg');
@@ -357,6 +403,8 @@ let inFlight = false;
 let lastUnread = 0;
 let lastTypingAt = 0;
 let messagesById = new Map();
+let pendingVoiceCaller = '';
+let lastIncomingVoiceNotificationId = null;
 
 function escapeHtml(s){ if (s==null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
 function escapeAttr(s){ return escapeHtml(s).replace(/`/g,'&#096;'); }
@@ -376,6 +424,85 @@ function formatBioHtml(bio){
   const cleaned = normalizeText(bio);
   if (!cleaned) return '<span style="color:var(--muted)">(no bio)</span>';
   return escapeHtml(cleaned).replace(/\n/g,'<br>');
+}
+function setAvatar(el, user){
+  el.innerHTML = '';
+  const url = user && user.avatar ? ((String(user.avatar).indexOf('/') === 0 || String(user.avatar).startsWith('http')) ? user.avatar : 'avatars/' + encodeURIComponent(user.avatar)) : '';
+  if (url) {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = user && user.username ? user.username : '';
+    el.appendChild(img);
+  } else {
+    el.textContent = (user && user.username ? user.username[0] : '?').toUpperCase();
+  }
+}
+const incomingVoiceSeen = new Set();
+let incomingVoiceRinger = null;
+let activeIncomingVoice = null;
+
+function normalizeVoiceCallText(n){
+  if (!n) return '';
+  return [n.type, n.kind, n.category, n.action, n.ref_type, n.message, n.message_text, n.message_body, n.title, n.subject, n.source_username]
+    .filter(v => v !== undefined && v !== null)
+    .map(v => String(v).toLowerCase())
+    .join(' | ');
+}
+function isVoiceCallNotification(n){
+  if (!n) return false;
+  const hay = normalizeVoiceCallText(n);
+  if (!hay) return false;
+  if (hay.includes('voice') && (hay.includes('call') || hay.includes('calling') || hay.includes('ring'))) return true;
+  if (hay.includes('incoming call') || hay.includes('voice call') || hay.includes('call from') || hay.includes('call invited')) return true;
+  if (hay.includes('dm voice') || hay.includes('private voice') || hay.includes('one-on-one voice')) return true;
+  return false;
+}
+function stopIncomingCallRinger(){
+  if (incomingVoiceRinger) {
+    clearInterval(incomingVoiceRinger);
+    incomingVoiceRinger = null;
+  }
+  try { const a = document.getElementById('bell2'); if (a) { a.pause(); a.currentTime = 0; } } catch(e){}
+}
+function startIncomingCallRinger(){
+  stopIncomingCallRinger();
+  const beat = ()=> {
+    try {
+      if (!audioUnlocked) return;
+      const a = document.getElementById('bell2');
+      if (a) {
+        a.currentTime = 0;
+        a.play().catch(()=>{});
+      }
+      if (navigator.vibrate) navigator.vibrate([180, 80, 220]);
+    } catch(e){}
+  };
+  beat();
+  incomingVoiceRinger = setInterval(beat, 3200);
+}
+function showIncomingCall(userName, avatar, text, notificationId){
+  activeIncomingVoice = notificationId || activeIncomingVoice || null;
+  pendingVoiceCaller = (userName || TARGET || '').trim();
+  ensureIncomingCallVisible(true);
+  INCOMING_TITLE.textContent = pendingVoiceCaller ? `${pendingVoiceCaller} is calling you` : 'Incoming voice call';
+  INCOMING_SUB.textContent = text || 'Tap accept to join the call without leaving this page.';
+  setAvatar(INCOMING_AVATAR, { username: pendingVoiceCaller || 'Caller', avatar });
+  INCOMING_CALL.style.display = 'flex';
+  INCOMING_CALL.setAttribute('aria-hidden','false');
+  startIncomingCallRinger();
+}
+function hideIncomingCall(){
+  INCOMING_CALL.style.display = 'none';
+  INCOMING_CALL.setAttribute('aria-hidden','true');
+  activeIncomingVoice = null;
+  stopIncomingCallRinger();
+}
+function ensureIncomingCallVisible(force = false){
+  if (!INCOMING_CALL) return;
+  if (force) {
+    INCOMING_CALL.style.display = 'flex';
+    INCOMING_CALL.setAttribute('aria-hidden','false');
+  }
 }
 function escapeForRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 const EMOJI_RE = /([\u{1F1E6}-\u{1FAFF}\u2600-\u27BF])/gu;
@@ -676,6 +803,31 @@ async function send(){
   msgEl.value = ''; charCount.textContent = '0/750'; clearReply();
   await pollOnce();
 }
+
+async function uploadAndSendImage(file){
+  try {
+    if (!file) return;
+    if (file.size > 6 * 1024 * 1024) return alert('Image too large');
+    const allowed = ['image/png','image/jpeg','image/webp','image/gif'];
+    if (!allowed.includes(file.type)) return alert('Unsupported image type');
+    if (relationship && relationship.allowed === false) return alert("You can't message this user yet.");
+    const fd = new FormData();
+    fd.append('image', file);
+    const resp = await fetch(UPLOAD_API, { method:'POST', body: fd, credentials:'same-origin' });
+    const j = await resp.json().catch(()=>null);
+    if (!j || !j.ok || !j.url) return alert('Upload failed');
+    const body = new FormData();
+    body.append('message', `![image](${j.url})`);
+    if (replyingTo && replyingTo.id) body.append('reply_to', replyingTo.id);
+    await fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&mode=send', { method:'POST', body, credentials:'same-origin' });
+    clearReply();
+    await pollOnce();
+  } catch (e) {
+    console.error('uploadAndSendImage', e);
+    alert('Upload failed');
+  }
+}
+
 sendBtn.addEventListener('click', send);
 msgEl.addEventListener('keydown', (e)=> { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 msgEl.addEventListener('input', ()=> {
@@ -685,6 +837,13 @@ msgEl.addEventListener('input', ()=> {
     lastTypingAt = now;
     navigator.sendBeacon ? navigator.sendBeacon('message_interface.php?user=' + encodeURIComponent(TARGET) + '&mode=typing') : fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&mode=typing', { method:'POST', keepalive:true, credentials:'same-origin' }).catch(()=>{});
   }
+});
+IMAGE_BTN.addEventListener('click', ()=> IMAGE_INPUT.click());
+IMAGE_INPUT.addEventListener('change', async (e)=> {
+  const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+  if (!file) return;
+  await uploadAndSendImage(file);
+  IMAGE_INPUT.value = '';
 });
 
 function updateTyping(list){
@@ -781,19 +940,33 @@ blockBtn.addEventListener('click', async ()=> {
   if (j && j.ok) await loadOnce(); else alert(j && j.error ? j.error : 'Failed');
 });
 
-function openVoice(){
-  VOICE_FRAME.src = 'message_voice.php?user=' + encodeURIComponent(TARGET) + '&embed=1';
+function normalizeRoomSlug(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+function voiceRoomForPair(a, b){
+  const parts = [normalizeRoomSlug(a), normalizeRoomSlug(b)].filter(Boolean).sort();
+  return 'dmvoice_' + (parts.join('__') || 'room');
+}
+function openVoice(userName){
+  const who = (userName || TARGET || '').trim();
+  const room = voiceRoomForPair(MY_USERNAME, who);
+  VOICE_TITLE.textContent = 'Voice with ' + who;
+  VOICE_FRAME.src = 'message_voice.php?room=' + encodeURIComponent(room) + '&embed=1';
   VOICE_MODAL.classList.add('open');
   VOICE_MODAL.setAttribute('aria-hidden', 'false');
-  voiceStatus.textContent = 'Opening voice call…';
+  voiceStatus.textContent = 'Connecting to call…';
 }
 function closeVoice(){
   VOICE_MODAL.classList.remove('open');
   VOICE_MODAL.setAttribute('aria-hidden', 'true');
   VOICE_FRAME.src = 'about:blank';
 }
-voiceBtn.addEventListener('click', openVoice);
-voiceBtn2.addEventListener('click', openVoice);
+voiceBtn.addEventListener('click', ()=> openVoice(TARGET));
+voiceBtn2.addEventListener('click', ()=> openVoice(TARGET));
 voiceCloseBtn.addEventListener('click', closeVoice);
 voiceLeaveBtn.addEventListener('click', closeVoice);
 window.addEventListener('message', (ev)=> {
@@ -801,6 +974,19 @@ window.addEventListener('message', (ev)=> {
   if (d && d.type === 'voice-status') voiceStatus.textContent = d.text || 'In call';
   if (d && d.type === 'close-message-voice') closeVoice();
 });
+INCOMING_ACCEPT.addEventListener('click', ()=> { hideIncomingCall(); openVoice(pendingVoiceCaller || TARGET); });
+INCOMING_DISMISS.addEventListener('click', hideIncomingCall);
+INCOMING_CALL.addEventListener('click', (e)=> { if (e.target === INCOMING_CALL) hideIncomingCall(); });
+
+// keep the incoming call visually loud if one is active
+setInterval(()=> {
+  if (INCOMING_CALL.style.display === 'flex' && audioUnlocked) {
+    const title = INCOMING_TITLE.textContent || 'Incoming voice call';
+    if (!title.toLowerCase().includes('calling you')) {
+      INCOMING_TITLE.textContent = pendingVoiceCaller ? `${pendingVoiceCaller} is calling you` : 'Incoming voice call';
+    }
+  }
+}, 1200);
 
 const sidebarOpeners = [friendsBtn, sheetOpenBtn].filter(Boolean);
 sidebarOpeners.forEach(btn => btn.addEventListener('click', ()=> openSheet('profile')));
@@ -822,11 +1008,17 @@ async function refreshNotifBadge(){
 function renderNotifRow(n){
   const row = document.createElement('div');
   row.className = 'notifRow';
-  row.innerHTML = `<div class="notifTitle">${escapeHtml(n.source_username||'System')}</div><div class="notifMsg">${escapeHtml((n.message||'').slice(0,140))}</div>`;
+  const extra = isVoiceCallNotification(n) ? ' · voice call' : '';
+  row.innerHTML = `<div class="notifTitle">${escapeHtml(n.source_username||'System')}${extra}</div><div class="notifMsg">${escapeHtml((n.message||'').slice(0,140))}</div>`;
   row.addEventListener('click', async ()=> {
     try { await fetch(NOTIF_API, { method:'POST', credentials:'same-origin', body: new URLSearchParams({ action:'mark_read', id: n.id }) }); } catch(e){}
     notifDropdown.style.display = 'none';
     const refCode = n.ref_code || n.ref || n.code || null;
+    if (isVoiceCallNotification(n)) {
+      incomingVoiceSeen.add(String(n.id));
+      showIncomingCall(n.source_username || TARGET, n.source_avatar || n.avatar || null, n.message || 'Tap accept to join this voice call.', n.id);
+      return;
+    }
     if (refCode) { location.href = 'mobile_private.php?code=' + encodeURIComponent(refCode); return; }
     if (n.type && String(n.type).indexOf('dm') !== -1 && n.source_username) { location.href = 'mobile_message.php?user=' + encodeURIComponent(n.source_username); return; }
     if (n.ref_id) { location.href = 'mobile_message.php?user=' + encodeURIComponent(n.source_username || TARGET); return; }
@@ -842,6 +1034,19 @@ async function loadNotifs(){
   notifBadge.textContent = unread > 99 ? '99+' : String(unread);
   notifDropdown.innerHTML = '';
   const rows = Array.isArray(j.notifications) ? j.notifications : [];
+
+  const callRow = rows.find(n => isVoiceCallNotification(n) && !incomingVoiceSeen.has(String(n.id)));
+  if (callRow) {
+    incomingVoiceSeen.add(String(callRow.id));
+    lastIncomingVoiceNotificationId = callRow.id;
+    showIncomingCall(
+      callRow.source_username || TARGET,
+      callRow.source_avatar || callRow.avatar || null,
+      callRow.message || callRow.title || 'Tap accept to join this voice call.',
+      callRow.id
+    );
+  }
+
   if (rows.length === 0) { notifDropdown.innerHTML = '<div class="emptyState">No notifications</div>'; return; }
   rows.forEach(n => notifDropdown.appendChild(renderNotifRow(n)));
 }
@@ -852,7 +1057,6 @@ friendsBtn.addEventListener('click', ()=> openSheet('friends'));
 sheetOpenBtn.addEventListener('click', ()=> openSheet('profile'));
 
 document.getElementById('backBtn').addEventListener('click', ()=> { location.href = 'mobile_room.php'; });
-document.getElementById('emojiBtn').addEventListener('click', ()=> { msgEl.focus(); msgEl.value += '😊'; charCount.textContent = Array.from(msgEl.value).length + '/750'; });
 
 window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') { closeSheet(); closeVoice(); } });
 window.addEventListener('beforeunload', ()=> running = false);
