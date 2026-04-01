@@ -1,6 +1,6 @@
 <?php
 // community.php - view a community, list its channels, and open them (loads private.php / private_voice.php in iframe)
-// Updated for mobile-friendly voice indicators, live voice counts, and per-channel voice codes.
+// Updated for mobile-friendly voice indicators, live voice counts, per-channel voice codes, and incoming call overlay.
 
 require "config.php";
 
@@ -630,6 +630,36 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
   border-radius:6px;
 }
 .contextMenu button:hover{background:rgba(255,255,255,0.02)}
+
+/* incoming call overlay */
+.incomingCall{
+  position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;
+  background:radial-gradient(circle at center, rgba(88,101,242,.18), rgba(4,6,10,.88) 55%, rgba(0,0,0,.96) 100%);
+  backdrop-filter:blur(12px);
+}
+.incomingCard{
+  position:relative;width:min(94vw, 460px);
+  border-radius:28px;padding:20px 18px 18px;
+  background:linear-gradient(180deg, rgba(20,24,34,.99), rgba(10,13,20,.99));
+  border:1px solid rgba(255,255,255,.08);
+  box-shadow:0 28px 100px rgba(0,0,0,.68);
+}
+.incomingHead{display:flex;gap:14px;align-items:center}
+.incomingAvatar{
+  width:68px;height:68px;border-radius:22px;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#232a3d,#151a26);
+  font-weight:900;font-size:26px;flex:0 0 68px;border:1px solid rgba(255,255,255,.06);
+}
+.incomingAvatar img{width:100%;height:100%;object-fit:cover;display:block}
+.incomingTitle{font-weight:950;font-size:22px;line-height:1.1}
+.incomingSub{margin-top:6px;color:#e6ecfb;font-size:15px;line-height:1.45}
+.incomingActions{display:flex;gap:10px;margin-top:18px}
+.incomingActions .pillBtn{
+  flex:1;padding:14px 14px;font-weight:950;min-height:50px;border:0;border-radius:14px;color:#eef3ff;cursor:pointer
+}
+.incomingActions .pillBtn.primary{background:linear-gradient(135deg,#5865F2,#7b89ff)}
+.incomingActions .pillBtn.ghost{background:rgba(255,255,255,.06)}
+.incomingHint{margin-top:12px;color:#aab4c5;font-size:12px;text-align:center;line-height:1.4}
 </style>
 </head>
 <body>
@@ -637,7 +667,7 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
   <div style="display:flex;align-items:center;gap:12px">
     <button id="toggleSidebar" class="toggleBtn" title="Toggle channels sidebar">☰</button>
     <div style="font-weight:800;font-size:18px"><?= htmlspecialchars($community['name'] ?? 'Community') ?></div>
-    <div class="small"><?= htmlspecialchars($community['description'] ?? '') ?></div>
+    <div class="small" id="currentRoomMeta"><?= htmlspecialchars($community['description'] ?? '') ?></div>
   </div>
   <div class="topActions">
     <button onclick="location.href='room.php'" class="btn">Back to Nodes</button>
@@ -823,6 +853,30 @@ html,body{height:100%;margin:0;background:var(--bg);color:#eef3ff;font-family:In
   </div>
 </div>
 
+<div class="incomingCall" id="incomingCall" aria-hidden="true">
+  <div class="incomingCard">
+    <div class="incomingHead">
+      <div class="incomingAvatar" id="incomingAvatar"></div>
+      <div style="min-width:0;flex:1">
+        <div class="incomingTitle" id="incomingTitle">Incoming call</div>
+        <div class="incomingSub" id="incomingSub">Someone is calling…</div>
+      </div>
+    </div>
+    <div class="incomingActions">
+      <button class="pillBtn primary" id="incomingAcceptBtn">Open</button>
+      <button class="pillBtn ghost" id="incomingDismissBtn">Dismiss</button>
+    </div>
+    <div class="incomingHint">This stays on screen until you choose.</div>
+  </div>
+</div>
+
+<audio id="notifBellAudio" preload="auto">
+  <source src="root/bell_2.mp3" type="audio/mpeg">
+</audio>
+<audio id="call_bell" preload="auto">
+  <source src="root/bell_3.mp3" type="audio/mpeg">
+</audio>
+
 <script>
 /* ---------- config & state ---------- */
 const COMMUNITY_ID = <?= json_encode($community_id) ?>;
@@ -839,8 +893,20 @@ const ACCESSIBLE_VOICE_CODES = <?= $voice_count_codes_json ?>;
 const INITIAL_SELECTED_CODE = <?= $selected_code_json ?>;
 const INITIAL_SELECTED_KIND = <?= $selected_kind_json ?>;
 
+const bell2 = document.getElementById('notifBellAudio');
+const callBell = document.getElementById('call_bell');
+
 let audioUnlocked = false;
-document.addEventListener('pointerdown', ()=> audioUnlocked = true, { once:true });
+function unlockAudioOnce() {
+  audioUnlocked = true;
+  try {
+    if (bell2) bell2.load();
+    if (callBell) callBell.load();
+  } catch (e) {}
+}
+document.addEventListener('pointerdown', unlockAudioOnce, { once:true });
+document.addEventListener('touchstart', unlockAudioOnce, { once:true, passive:true });
+document.addEventListener('keydown', unlockAudioOnce, { once:true });
 
 /* ---------- sidebar ---------- */
 const toggleBtn = document.getElementById('toggleSidebar');
@@ -872,6 +938,7 @@ function loadRoom(code, kind) {
     iframeWrap.appendChild(ifr);
     chatFrame = ifr;
   }
+  refreshCurrentVoiceMeta();
 }
 
 function setActiveRoom(el) {
@@ -892,7 +959,6 @@ roomEls.forEach(el => {
     if (!code) return;
     setActiveRoom(el);
     loadRoom(code, kind);
-    refreshCurrentVoiceMeta();
   });
 });
 
@@ -938,7 +1004,6 @@ if (newChannelForm) {
           }
           setActiveRoom(div);
           loadRoom(j.code, roomType);
-          refreshCurrentVoiceMeta();
         });
 
         if (roomType === 'voice') {
@@ -1001,6 +1066,20 @@ function showModerationMenuAt(pageX, pageY, username, userId) {
 }
 
 function escapeHtml(s){ if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function setAvatar(el, user) {
+  if (!el) return;
+  el.innerHTML = '';
+  const url = user && user.avatar ? ((String(user.avatar).indexOf('/') === 0 || String(user.avatar).startsWith('http')) ? user.avatar : 'avatars/' + encodeURIComponent(user.avatar)) : '';
+  if (url) {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = user && user.username ? user.username : '';
+    el.appendChild(img);
+  } else {
+    el.textContent = (user && user.username ? user.username[0] : '?').toUpperCase();
+  }
+}
 
 async function enhanceIframeElements(){
   const doc = getIframeDoc();
@@ -1139,15 +1218,158 @@ function showUserRolesHover(x, y, rolesArray) {
 }
 function hideUserRolesHover() { userRolesHover.style.display = 'none'; userRolesHover.setAttribute('aria-hidden','true'); }
 
+/* ---------- incoming call overlay ---------- */
+const CALL_API = 'community_interface.php?action=call_state';
+const INCOMING_CALL = document.getElementById('incomingCall');
+const INCOMING_AVATAR = document.getElementById('incomingAvatar');
+const INCOMING_TITLE = document.getElementById('incomingTitle');
+const INCOMING_SUB = document.getElementById('incomingSub');
+const INCOMING_ACCEPT = document.getElementById('incomingAcceptBtn');
+const INCOMING_DISMISS = document.getElementById('incomingDismissBtn');
+
+let activeIncomingCall = null;
+let incomingCallRinger = null;
+let incomingCallRetry = null;
+let pendingVoiceCaller = '';
+
+function stopIncomingCallRinger() {
+  if (incomingCallRinger) {
+    clearInterval(incomingCallRinger);
+    incomingCallRinger = null;
+  }
+  if (incomingCallRetry) {
+    clearTimeout(incomingCallRetry);
+    incomingCallRetry = null;
+  }
+  try {
+    if (callBell) {
+      callBell.pause();
+      callBell.currentTime = 0;
+      callBell.loop = false;
+    }
+  } catch (e) {}
+}
+
+async function playIncomingCallBell() {
+  if (!callBell) return false;
+  try {
+    callBell.loop = true;
+    callBell.currentTime = 0;
+    const p = callBell.play();
+    if (p && typeof p.then === 'function') await p;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function startIncomingCallRinger() {
+  stopIncomingCallRinger();
+
+  const beat = async () => {
+    const ok = await playIncomingCallBell();
+    if (!ok) {
+      incomingCallRetry = setTimeout(beat, 1200);
+    } else if (navigator.vibrate) {
+      navigator.vibrate([180, 80, 220]);
+    }
+  };
+
+  await beat();
+
+  incomingCallRinger = setInterval(() => {
+    try {
+      if (callBell && callBell.paused) {
+        callBell.currentTime = 0;
+        callBell.play().catch(()=>{});
+      }
+    } catch (e) {}
+  }, 3200);
+}
+
+async function showIncomingCall(userName, avatar, text, callId){
+  activeIncomingCall = callId || activeIncomingCall || null;
+  pendingVoiceCaller = (userName || '').trim();
+  INCOMING_TITLE.textContent = pendingVoiceCaller ? `${pendingVoiceCaller} is calling you` : 'Incoming call';
+  INCOMING_SUB.textContent = text || 'Tap Open to continue.';
+  setAvatar(INCOMING_AVATAR, { username: pendingVoiceCaller || 'Caller', avatar });
+  INCOMING_CALL.style.display = 'flex';
+  INCOMING_CALL.setAttribute('aria-hidden', 'false');
+  await startIncomingCallRinger();
+}
+
+function hideIncomingCall(){
+  INCOMING_CALL.style.display = 'none';
+  INCOMING_CALL.setAttribute('aria-hidden', 'true');
+  activeIncomingCall = null;
+  stopIncomingCallRinger();
+}
+
+async function refreshCallState() {
+  try {
+    const r = await fetch(CALL_API, { credentials:'same-origin' });
+    if (!r.ok) return;
+    const j = await r.json();
+    const call = j && j.call ? j.call : null;
+    if (!call) {
+      if (activeIncomingCall) hideIncomingCall();
+      return;
+    }
+
+    if (String(call.status) === 'ringing' && Number(call.callee_id) === Number(ME_ID)) {
+      if (String(activeIncomingCall || '') !== String(call.id)) {
+        showIncomingCall(
+          call.caller_username || 'Caller',
+          call.caller_avatar || null,
+          'Tap Open to go to the call.',
+          call.id
+        );
+      }
+    } else if (activeIncomingCall && String(activeIncomingCall) === String(call.id) && String(call.status) !== 'ringing') {
+      hideIncomingCall();
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+INCOMING_ACCEPT.addEventListener('click', async ()=>{
+  const caller = pendingVoiceCaller || (INCOMING_TITLE.textContent || '').replace(' is calling you', '').trim();
+  try {
+    if (caller) {
+      await fetch(
+        'message_interface.php?user=' + encodeURIComponent(caller) + '&mode=voice_call_accept',
+        { method:'POST', credentials:'same-origin' }
+      );
+    }
+  } catch (e) {}
+  hideIncomingCall();
+  if (caller) {
+    location.href = 'message.php?user=' + encodeURIComponent(caller);
+  }
+});
+
+INCOMING_DISMISS.addEventListener('click', async ()=>{
+  const caller = pendingVoiceCaller || (INCOMING_TITLE.textContent || '').replace(' is calling you', '').trim();
+  try {
+    if (caller) {
+      await fetch(
+        'message_interface.php?user=' + encodeURIComponent(caller) + '&mode=voice_call_dismiss',
+        { method:'POST', credentials:'same-origin' }
+      );
+    }
+  } catch (e) {}
+  hideIncomingCall();
+});
+
+INCOMING_CALL.addEventListener('click', (e)=> { if (e.target === INCOMING_CALL) hideIncomingCall(); });
+
 /* ---------- voice counts ---------- */
 const voiceCountMap = {};
 let voicePollTimer = null;
 
 function refreshCurrentVoiceMeta() {
   const active = document.querySelector('.roomItem.active[data-kind="voice"]');
-  const metaEl = document.querySelector('#mainContent ~ *'); // no-op safeguard
-  const currentMeta = document.querySelector('.iframeWrap') ? null : null;
-
   const titleMeta = document.querySelector('#currentRoomMeta');
   if (!titleMeta) return;
 
@@ -1201,7 +1423,6 @@ const notifList = document.getElementById('notifList');
 const markAllBtn = document.getElementById('markAllBtn');
 
 let lastUnread = 0;
-const POLL_INTERVAL = 30000;
 const API = 'notifications.php';
 const marked = new Set();
 
@@ -1319,7 +1540,7 @@ async function loadNotifications(opened=false) {
     const j = await fetchNotifications(200);
     const unread = j.unread_count || 0;
     if (unread > (lastUnread || 0) && lastUnread !== 0) {
-      try { if (audioUnlocked) { bell2.currentTime = 0; bell2.play().catch(()=>{}); } } catch(e){}
+      try { if (audioUnlocked && bell2) { bell2.currentTime = 0; bell2.play().catch(()=>{}); } } catch(e){}
     }
     lastUnread = unread;
     if (unread > 0) { notifBadge.style.display = 'inline-block'; notifBadge.textContent = unread > 99 ? '99+' : String(unread); }
@@ -1416,7 +1637,7 @@ async function startNotifPolling() {
     notifPollingTimer = setInterval(async ()=> {
       try {
         const k = await fetchNotifications(5);
-        if (k.unread_count > lastUnread && audioUnlocked) { bell2.currentTime = 0; bell2.play().catch(()=>{}); }
+        if (k.unread_count > lastUnread && audioUnlocked && bell2) { bell2.currentTime = 0; bell2.play().catch(()=>{}); }
         lastUnread = k.unread_count;
         if (lastUnread > 0) {
           notifBadge.style.display='inline-block';
@@ -1432,24 +1653,32 @@ async function startNotifPolling() {
   const selected = INITIAL_SELECTED_CODE;
   const selectedKind = INITIAL_SELECTED_KIND;
   if (selected) {
-    const nameEl = document.querySelector(`.roomItem[data-code="${CSS.escape(selected)}"] .name`);
-    const name = nameEl ? nameEl.textContent.trim() : 'Channel';
     const selectedEl = document.querySelector(`.roomItem[data-code="${CSS.escape(selected)}"]`);
     if (selectedEl) selectedEl.classList.add('active');
     loadRoom(selected, selectedKind);
   }
 })();
 
-/* ---------- periodic voice counts ---------- */
+/* ---------- periodic voice counts + incoming calls ---------- */
 async function startVoicePolling() {
   await refreshVoiceCounts();
+  await refreshCallState();
   refreshCurrentVoiceMeta();
   if (voicePollTimer) clearInterval(voicePollTimer);
-  voicePollTimer = setInterval(refreshVoiceCounts, 12000);
+  voicePollTimer = setInterval(async () => {
+    await refreshVoiceCounts();
+    await refreshCallState();
+    refreshCurrentVoiceMeta();
+  }, 5000);
 }
 
 /* ---------- start ---------- */
-window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') { closeNotifBox(); } });
+window.addEventListener('keydown', (e)=> {
+  if (e.key === 'Escape') {
+    closeNotifBox();
+    hideIncomingCall();
+  }
+});
 function closeNotifBox() {
   notifDropdown.style.display = 'none';
 }
@@ -1463,7 +1692,7 @@ startNotifPolling();
 startVoicePolling();
 refreshVoiceCounts();
 refreshCurrentVoiceMeta();
-
+refreshCallState();
 </script>
 </body>
 </html>
