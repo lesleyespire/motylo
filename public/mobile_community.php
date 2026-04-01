@@ -1,6 +1,7 @@
 <?php
 // mobile_community.php - mobile-optimized community view with swipe channel switching,
-// larger iframe area, and support for text / voice / hidden rooms.
+// larger iframe area, support for text / voice / hidden rooms,
+// and incoming voice-call overlay triggered from polling.
 
 require "config.php";
 
@@ -158,6 +159,36 @@ function user_can_view_channel($channel_required_role_id, $me_id, $community_id,
     return false;
 }
 
+function normalize_voice_call_text($n): string {
+    if (!$n) return '';
+    $parts = [
+        $n['type'] ?? null,
+        $n['kind'] ?? null,
+        $n['category'] ?? null,
+        $n['action'] ?? null,
+        $n['ref_type'] ?? null,
+        $n['message'] ?? null,
+        $n['message_text'] ?? null,
+        $n['message_body'] ?? null,
+        $n['title'] ?? null,
+        $n['subject'] ?? null,
+        $n['source_username'] ?? null,
+        $n['context'] ?? null,
+        $n['ref_code'] ?? null
+    ];
+    $parts = array_values(array_filter($parts, fn($v) => $v !== null && $v !== ''));
+    return strtolower(implode(' | ', array_map('strval', $parts)));
+}
+
+function is_voice_call_notification($n): bool {
+    $hay = normalize_voice_call_text($n);
+    if ($hay === '') return false;
+    if (str_contains($hay, 'voice') && (str_contains($hay, 'call') || str_contains($hay, 'calling') || str_contains($hay, 'ring'))) return true;
+    if (str_contains($hay, 'incoming call') || str_contains($hay, 'voice call') || str_contains($hay, 'call from') || str_contains($hay, 'call invited')) return true;
+    if (str_contains($hay, 'dm voice') || str_contains($hay, 'private voice') || str_contains($hay, 'one-on-one voice')) return true;
+    return false;
+}
+
 /* ----------------------------
    ensure private_rooms schema
 ---------------------------- */
@@ -280,8 +311,44 @@ try {
 $is_admin = is_comm_admin_local($pdo, $community_id, $me_id);
 $is_owner = ((int)$community['owner_id'] === $me_id);
 
+$can_timeout = false;
+$can_ban = false;
+$can_manage_roles = $is_admin || $is_owner;
+try {
+    if ($is_owner) {
+        $can_timeout = true;
+        $can_ban = true;
+    } else {
+        $hasMany = (bool)$pdo->query("SHOW TABLES LIKE 'community_member_roles'")->fetchColumn();
+        if ($hasMany) {
+            $p = $pdo->prepare("SELECT MAX(cr.can_timeout) AS can_timeout, MAX(cr.can_ban) AS can_ban, MAX(cr.is_admin) AS is_admin
+                                FROM community_member_roles mr
+                                JOIN community_roles cr ON cr.id = mr.role_id
+                                WHERE mr.community_id = ? AND mr.user_id = ?");
+            $p->execute([$community_id, $me_id]);
+            $row = $p->fetch(PDO::FETCH_ASSOC);
+            if ($row) {
+                $can_timeout = !empty($row['can_timeout']);
+                $can_ban = !empty($row['can_ban']);
+                if (!empty($row['is_admin'])) $can_manage_roles = true;
+            }
+        } else {
+            $p = $pdo->prepare("SELECT cr.can_timeout, cr.can_ban, cr.is_admin
+                                FROM community_members cm JOIN community_roles cr ON cr.id = cm.role_id
+                                WHERE cm.community_id = ? AND cm.user_id = ? LIMIT 1");
+            $p->execute([$community_id, $me_id]);
+            $row = $p->fetch(PDO::FETCH_ASSOC);
+            if ($row) {
+                $can_timeout = !empty($row['can_timeout']);
+                $can_ban = !empty($row['can_ban']);
+                if (!empty($row['is_admin'])) $can_manage_roles = true;
+            }
+        }
+    }
+} catch (Exception $e) { /* ignore */ }
+
 /* ----------------------------
-   accessible rooms
+   accessible / selected rooms
 ---------------------------- */
 $accessible_codes = [];
 $selected_code = $_GET['code'] ?? ($general['code'] ?? null);
@@ -290,7 +357,6 @@ $default_text_choice = null;
 $default_voice_choice = null;
 
 $accessible_voice_codes = [];
-$accessible_voice_rooms = [];
 $visible_hidden_channels = [];
 
 foreach ($regular_channels as $ch) {
@@ -305,7 +371,6 @@ foreach ($voice_channels as $ch) {
     if ($can) {
         $accessible_codes[] = $ch['code'];
         $accessible_voice_codes[] = $ch['code'];
-        $accessible_voice_rooms[] = $ch;
         if ($default_voice_choice === null) $default_voice_choice = $ch['code'];
     }
 }
@@ -316,7 +381,6 @@ foreach ($hidden_channels as $ch) {
         $visible_hidden_channels[] = $ch;
         if (!empty($ch['is_voice'])) {
             $accessible_voice_codes[] = $ch['code'];
-            $accessible_voice_rooms[] = $ch;
             if ($default_voice_choice === null) $default_voice_choice = $ch['code'];
         } else {
             if ($default_text_choice === null) $default_text_choice = $ch['code'];
@@ -387,7 +451,7 @@ $selected_kind_json = json_encode($selected_kind ?: 'text');
 ---------------------------- */
 ?>
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -581,7 +645,6 @@ button,input,select{font:inherit}
   color:var(--muted);
   font-size:12px;
 }
-
 .roomBtnRow{
   display:flex;
   gap:8px;
@@ -617,7 +680,6 @@ button,input,select{font:inherit}
   display:flex;
   flex-direction:column;
 }
-
 .sheet.open{ transform:translateY(0); }
 .sheetOverlay.open{ display:block; }
 
@@ -636,12 +698,10 @@ button,input,select{font:inherit}
   justify-content:space-between;
   gap:10px;
 }
-
 .sheetHead .sheetTitle{
   font-weight:800;
   font-size:16px;
 }
-
 .sheetSearchWrap{
   padding:0 14px 12px;
 }
@@ -654,13 +714,11 @@ button,input,select{font:inherit}
   border-radius:14px;
   outline:none;
 }
-
 .sheetBody{
   padding:0 12px 12px;
   overflow:auto;
   min-height:0;
 }
-
 .sectionLabel{
   display:flex;
   align-items:center;
@@ -672,14 +730,12 @@ button,input,select{font:inherit}
   letter-spacing:.08em;
   padding:10px 6px 8px;
 }
-
 .channelList{
   display:flex;
   flex-direction:column;
   gap:8px;
   margin-bottom:10px;
 }
-
 .channelItem{
   display:flex;
   align-items:center;
@@ -692,7 +748,6 @@ button,input,select{font:inherit}
   user-select:none;
   border:1px solid transparent;
 }
-
 .channelItem .name{
   font-weight:700;
   min-width:0;
@@ -700,34 +755,27 @@ button,input,select{font:inherit}
   text-overflow:ellipsis;
   white-space:nowrap;
 }
-
 .channelItem .meta{
   color:var(--muted);
   font-size:12px;
   flex:0 0 auto;
 }
-
 .channelItem.active{
   background:rgba(63,123,255,0.16);
   border-color:rgba(63,123,255,0.25);
 }
-
 .channelItem.locked{
   opacity:.55;
 }
-
 .channelItem.hiddenRoom{
   background:rgba(255,255,255,0.02);
 }
-
 .channelItem.voiceRoom{
   background:rgba(70,120,255,0.08);
 }
-
 .channelItem.disabled{
   cursor:not-allowed;
 }
-
 .channelItem .voiceStatus{
   display:inline-flex;
   align-items:center;
@@ -735,7 +783,6 @@ button,input,select{font:inherit}
   color:var(--muted);
   font-size:12px;
 }
-
 .voiceDot{
   width:8px;
   height:8px;
@@ -748,14 +795,12 @@ button,input,select{font:inherit}
   background:#667085;
   box-shadow:none;
 }
-
 .formCard{
   padding:12px;
   border-radius:16px;
   background:rgba(255,255,255,0.03);
   border:1px solid rgba(255,255,255,0.03);
 }
-
 .formRow{ margin-bottom:8px; }
 .select, .input{
   width:100%;
@@ -774,7 +819,6 @@ button,input,select{font:inherit}
   font-size:14px;
 }
 .checkRow input{ width:18px;height:18px; }
-
 .rolesRow{
   display:flex;
   flex-wrap:wrap;
@@ -788,13 +832,11 @@ button,input,select{font:inherit}
   color:#000;
   font-weight:700;
 }
-
 .smallNote{
   color:var(--muted);
   font-size:12px;
   line-height:1.35;
 }
-
 .notifDrawer{
   position:fixed;
   top:64px;
@@ -809,13 +851,11 @@ button,input,select{font:inherit}
   border-radius:16px;
   box-shadow:0 16px 44px rgba(0,0,0,0.5);
 }
-
 .notifRow{
   padding:12px;
   border-bottom:1px solid rgba(255,255,255,0.03);
 }
 .notifRow:last-child{ border-bottom:0; }
-
 .notifTitle{
   font-weight:700;
   margin-bottom:4px;
@@ -824,7 +864,6 @@ button,input,select{font:inherit}
   color:var(--muted);
   font-size:13px;
 }
-
 .voiceLiveBadge{
   display:inline-flex;
   align-items:center;
@@ -843,6 +882,50 @@ button,input,select{font:inherit}
   background:#4cd964;
   box-shadow:0 0 0 4px rgba(76,217,100,0.12);
 }
+
+/* incoming call */
+.incomingCall{
+  position:fixed;
+  inset:0;
+  z-index:9999;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  background:radial-gradient(circle at center, rgba(88,101,242,.18), rgba(4,6,10,.88) 55%, rgba(0,0,0,.96) 100%);
+  backdrop-filter:blur(12px);
+}
+.incomingCard{
+  position:relative;
+  width:min(94vw, 460px);
+  border-radius:28px;
+  padding:20px 18px 18px;
+  background:linear-gradient(180deg, rgba(20,24,34,.99), rgba(10,13,20,.99));
+  border:1px solid rgba(255,255,255,.08);
+  box-shadow:0 28px 100px rgba(0,0,0,.68);
+}
+.incomingHead{display:flex;gap:14px;align-items:center}
+.incomingAvatar{
+  width:68px;height:68px;border-radius:22px;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#232a3d,#151a26);
+  font-weight:900;font-size:26px;flex:0 0 68px;border:1px solid rgba(255,255,255,.06);
+}
+.incomingAvatar img{width:100%;height:100%;object-fit:cover;display:block}
+.incomingTitle{font-weight:950;font-size:22px;line-height:1.1}
+.incomingSub{margin-top:6px;color:#e6ecfb;font-size:15px;line-height:1.45}
+.incomingActions{display:flex;gap:10px;margin-top:18px}
+.incomingActions .pillBtn{
+  flex:1;
+  padding:14px 14px;
+  font-weight:950;
+  min-height:50px;
+  border:0;
+  border-radius:14px;
+  color:#eef3ff;
+  cursor:pointer;
+}
+.incomingActions .pillBtn.primary{background:linear-gradient(135deg,#5865F2,#7b89ff)}
+.incomingActions .pillBtn.ghost{background:rgba(255,255,255,.06)}
+.incomingHint{margin-top:12px;color:#aab4c5;font-size:12px;text-align:center;line-height:1.4}
 
 @media (min-width:900px){
   .viewer{
@@ -1074,6 +1157,30 @@ button,input,select{font:inherit}
   <div id="notifDrawer" class="notifDrawer"></div>
 </div>
 
+<div class="incomingCall" id="incomingCall" aria-hidden="true">
+  <div class="incomingCard">
+    <div class="incomingHead">
+      <div class="incomingAvatar" id="incomingAvatar"></div>
+      <div style="min-width:0;flex:1">
+        <div class="incomingTitle" id="incomingTitle">Incoming call</div>
+        <div class="incomingSub" id="incomingSub">Someone is calling…</div>
+      </div>
+    </div>
+    <div class="incomingActions">
+      <button class="pillBtn primary" id="incomingAcceptBtn">Open</button>
+      <button class="pillBtn ghost" id="incomingDismissBtn">Dismiss</button>
+    </div>
+    <div class="incomingHint">This stays on screen until you choose.</div>
+  </div>
+</div>
+
+<audio id="notifBellAudio" preload="auto">
+  <source src="root/bell_2.mp3" type="audio/mpeg">
+</audio>
+<audio id="call_bell" preload="auto">
+  <source src="root/bell_3.mp3" type="audio/mpeg">
+</audio>
+
 <script>
 const COMMUNITY_ID = <?= json_encode($community_id) ?>;
 const IS_ADMIN = <?= $is_admin ? 'true' : 'false' ?>;
@@ -1094,7 +1201,6 @@ const openChannelsBtn2 = document.getElementById('openChannelsBtn2');
 const closeSheetBtn = document.getElementById('closeSheetBtn');
 const channelSearch = document.getElementById('channelSearch');
 const iframeWrap = document.getElementById('iframeWrap');
-const chatFrame = document.getElementById('chatFrame');
 const notifBtn = document.getElementById('notifBtn');
 const notifBadge = document.getElementById('notifBadge');
 const notifDrawer = document.getElementById('notifDrawer');
@@ -1105,16 +1211,62 @@ const currentRoomMeta = document.getElementById('currentRoomMeta');
 const currentBar = document.getElementById('currentBar');
 const newChannelForm = document.getElementById('newChannelForm');
 
+const notifBellAudio = document.getElementById('notifBellAudio');
+const callBell = document.getElementById('call_bell');
+
+const INCOMING_CALL = document.getElementById('incomingCall');
+const INCOMING_AVATAR = document.getElementById('incomingAvatar');
+const INCOMING_TITLE = document.getElementById('incomingTitle');
+const INCOMING_SUB = document.getElementById('incomingSub');
+const INCOMING_ACCEPT = document.getElementById('incomingAcceptBtn');
+const INCOMING_DISMISS = document.getElementById('incomingDismissBtn');
+
 let voiceCounts = {};
 let voicePollTimer = null;
+let notifPollTimer = null;
+let pollLoopTimer = null;
+let audioUnlocked = false;
+let lastUnread = 0;
+let activeIncomingCall = null;
+let incomingCallRinger = null;
+let incomingCallRetry = null;
+let pendingVoiceCaller = '';
+const seenIncomingCallIds = new Set();
+const marked = new Set();
 
-function escapeHtml(s){ if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+document.addEventListener('pointerdown', unlockAudioOnce, { once:true });
+document.addEventListener('touchstart', unlockAudioOnce, { once:true, passive:true });
+document.addEventListener('keydown', unlockAudioOnce, { once:true });
+
+function unlockAudioOnce() {
+  audioUnlocked = true;
+  try {
+    if (notifBellAudio) notifBellAudio.load();
+    if (callBell) callBell.load();
+  } catch (e) {}
+}
+
+function escapeHtml(s){
+  if (!s) return '';
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#039;');
+}
+
+function safeFetchJson(url, options = {}) {
+  return fetch(url, options)
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+}
 
 function openSheet() {
   sheet.classList.add('open');
   sheetOverlay.classList.add('open');
   sheet.setAttribute('aria-hidden','false');
-  if (channelSearch) setTimeout(()=>channelSearch.focus(), 50);
+  if (channelSearch) setTimeout(() => channelSearch.focus(), 50);
 }
 function closeSheet() {
   sheet.classList.remove('open');
@@ -1126,10 +1278,10 @@ openChannelsBtn2?.addEventListener('click', openSheet);
 closeSheetBtn?.addEventListener('click', closeSheet);
 sheetOverlay?.addEventListener('click', closeSheet);
 
-backBtn.addEventListener('click', ()=> {
+backBtn.addEventListener('click', () => {
   location.href = 'mobile_room.php';
 });
-adminBtn?.addEventListener('click', ()=> {
+adminBtn?.addEventListener('click', () => {
   location.href = 'community_admin.php?public_id=' + encodeURIComponent(COMMUNITY_PUBLIC_ID);
 });
 
@@ -1164,25 +1316,12 @@ function updateVoiceDrawerLabels() {
     applyVoiceCountToRow(el, count);
   });
 
-  if (INITIAL_SELECTED_KIND === 'voice' && INITIAL_SELECTED_CODE) {
-    const c = Number(voiceCounts[INITIAL_SELECTED_CODE] || 0);
-    if (currentRoomMeta) {
-      currentRoomMeta.innerHTML = `
-        <span class="voiceLiveBadge">
-          <span class="dot"></span>
-          <span>${escapeHtml(c > 0 ? `${c} connected` : 'Connecting…')}</span>
-        </span>
-      `;
-    }
-  }
-
   const active = document.querySelector('.roomItem.active[data-voice="1"]');
   if (active) {
     const code = active.dataset.code;
     const c = Number(voiceCounts[code] || 0);
-    const barMeta = document.getElementById('currentRoomMeta');
-    if (barMeta && active.classList.contains('active')) {
-      barMeta.innerHTML = `
+    if (currentRoomMeta) {
+      currentRoomMeta.innerHTML = `
         <span class="voiceLiveBadge">
           <span class="dot"></span>
           <span>${escapeHtml(c > 0 ? `${c} connected` : 'No one else connected')}</span>
@@ -1193,17 +1332,11 @@ function updateVoiceDrawerLabels() {
 }
 
 async function fetchVoiceCounts() {
-  try {
-    const url = 'mobile_community.php?public_id=' + encodeURIComponent(COMMUNITY_PUBLIC_ID) + '&action=voice_counts';
-    const r = await fetch(url, { credentials:'same-origin' });
-    if (!r.ok) return;
-    const j = await r.json();
-    if (!j || !j.ok || !j.counts) return;
-    voiceCounts = j.counts || {};
-    updateVoiceDrawerLabels();
-  } catch (e) {
-    // ignore
-  }
+  const url = 'mobile_community.php?public_id=' + encodeURIComponent(COMMUNITY_PUBLIC_ID) + '&action=voice_counts';
+  const j = await safeFetchJson(url, { credentials:'same-origin' });
+  if (!j || !j.ok || !j.counts) return;
+  voiceCounts = j.counts || {};
+  updateVoiceDrawerLabels();
 }
 
 function loadRoom(code, kind, name, hidden, locked) {
@@ -1214,9 +1347,11 @@ function loadRoom(code, kind, name, hidden, locked) {
   }
 
   const src = roomSrcFor(code, kind);
-  if (chatFrame) chatFrame.src = src;
-  else {
-    const ifr = document.createElement('iframe');
+  let ifr = document.getElementById('chatFrame');
+  if (ifr) {
+    ifr.src = src;
+  } else {
+    ifr = document.createElement('iframe');
     ifr.id = 'chatFrame';
     ifr.src = src;
     ifr.allow = 'clipboard-write';
@@ -1232,19 +1367,9 @@ function loadRoom(code, kind, name, hidden, locked) {
   if (target) target.classList.add('active');
 
   if (kind === 'voice') {
-    setCurrentRoom(
-      name || 'Voice chat',
-      hidden === '1'
-        ? 'Hidden voice chat'
-        : 'Loading live count…'
-    );
+    setCurrentRoom(name || 'Voice chat', hidden === '1' ? 'Hidden voice chat' : 'Loading live count…');
   } else {
-    setCurrentRoom(
-      name || 'Channel',
-      hidden === '1'
-        ? 'Hidden room'
-        : 'Text room'
-    );
+    setCurrentRoom(name || 'Channel', hidden === '1' ? 'Hidden room' : 'Text room');
   }
 
   closeSheet();
@@ -1273,7 +1398,7 @@ function nextRoom(delta) {
 
 function wireRoomClicks() {
   document.querySelectorAll('.roomItem').forEach(el => {
-    el.addEventListener('click', ()=> {
+    el.addEventListener('click', () => {
       const code = el.dataset.code;
       const kind = el.dataset.kind || 'text';
       const name = el.querySelector('.name')?.textContent?.trim() || 'Channel';
@@ -1285,7 +1410,7 @@ function wireRoomClicks() {
 }
 wireRoomClicks();
 
-channelSearch?.addEventListener('input', ()=> {
+channelSearch?.addEventListener('input', () => {
   const q = channelSearch.value.trim().toLowerCase();
   document.querySelectorAll('.channelItem').forEach(el => {
     const name = (el.dataset.name || '').toLowerCase();
@@ -1352,7 +1477,7 @@ currentBar?.addEventListener('touchcancel', () => {
 });
 
 if (newChannelForm) {
-  newChannelForm.addEventListener('submit', async (ev)=> {
+  newChannelForm.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const fd = new FormData(newChannelForm);
     fd.append('community_id', COMMUNITY_ID);
@@ -1376,65 +1501,286 @@ if (newChannelForm) {
   });
 }
 
-// notifications
-async function fetchNotifications(limit=10) {
-  try {
-    const r = await fetch('notifications.php?limit=' + encodeURIComponent(limit), { credentials:'same-origin' });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch (e) { return null; }
+function normalizeVoiceCallText(n){
+  if (!n) return '';
+  return [
+    n.type, n.kind, n.category, n.action, n.ref_type,
+    n.message, n.message_text, n.message_body,
+    n.title, n.subject, n.source_username, n.context, n.ref_code
+  ]
+    .filter(v => v !== undefined && v !== null && v !== '')
+    .map(v => String(v).toLowerCase())
+    .join(' | ');
 }
+
+function isVoiceCallNotification(n){
+  if (!n) return false;
+  const hay = normalizeVoiceCallText(n);
+  if (!hay) return false;
+  if (hay.includes('voice') && (hay.includes('call') || hay.includes('calling') || hay.includes('ring'))) return true;
+  if (hay.includes('incoming call') || hay.includes('voice call') || hay.includes('call from') || hay.includes('call invited')) return true;
+  if (hay.includes('dm voice') || hay.includes('private voice') || hay.includes('one-on-one voice')) return true;
+  return false;
+}
+
+function stopIncomingCallRinger(){
+  if (incomingCallRinger) {
+    clearInterval(incomingCallRinger);
+    incomingCallRinger = null;
+  }
+  if (incomingCallRetry) {
+    clearTimeout(incomingCallRetry);
+    incomingCallRetry = null;
+  }
+  try {
+    if (callBell) {
+      callBell.pause();
+      callBell.currentTime = 0;
+      callBell.loop = false;
+    }
+  } catch (e) {}
+}
+
+async function playIncomingCallBell() {
+  if (!callBell) return false;
+  try {
+    callBell.loop = true;
+    callBell.currentTime = 0;
+    const p = callBell.play();
+    if (p && typeof p.then === 'function') await p;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function startIncomingCallRinger() {
+  stopIncomingCallRinger();
+
+  const beat = async () => {
+    const ok = await playIncomingCallBell();
+    if (!ok) {
+      incomingCallRetry = setTimeout(beat, 1200);
+    } else if (navigator.vibrate) {
+      navigator.vibrate([180, 80, 220]);
+    }
+  };
+
+  await beat();
+
+  incomingCallRinger = setInterval(() => {
+    try {
+      if (callBell && callBell.paused) {
+        callBell.currentTime = 0;
+        callBell.play().catch(() => {});
+      }
+    } catch (e) {}
+  }, 3200);
+}
+
+async function showIncomingCall(userName, avatar, text, callId){
+  activeIncomingCall = callId || activeIncomingCall || null;
+  pendingVoiceCaller = (userName || '').trim();
+  INCOMING_TITLE.textContent = pendingVoiceCaller ? `${pendingVoiceCaller} is calling you` : 'Incoming call';
+  INCOMING_SUB.textContent = text || 'Tap Open to continue.';
+  INCOMING_AVATAR.innerHTML = '';
+  if (avatar) {
+    const img = document.createElement('img');
+    img.src = (String(avatar).indexOf('/') === 0 || String(avatar).startsWith('http')) ? avatar : 'avatars/' + encodeURIComponent(avatar);
+    img.alt = pendingVoiceCaller || 'Caller';
+    INCOMING_AVATAR.appendChild(img);
+  } else {
+    INCOMING_AVATAR.textContent = (pendingVoiceCaller ? pendingVoiceCaller[0] : '?').toUpperCase();
+  }
+  INCOMING_CALL.style.display = 'flex';
+  INCOMING_CALL.setAttribute('aria-hidden', 'false');
+  await startIncomingCallRinger();
+}
+
+function hideIncomingCall(){
+  INCOMING_CALL.style.display = 'none';
+  INCOMING_CALL.setAttribute('aria-hidden', 'true');
+  activeIncomingCall = null;
+  stopIncomingCallRinger();
+}
+
+function maybeShowIncomingFromNotifications(rows){
+  const list = Array.isArray(rows) ? rows : [];
+  for (const n of list) {
+    if (!n || !isVoiceCallNotification(n)) continue;
+    const id = String(n.id || '');
+    if (!id || seenIncomingCallIds.has(id)) continue;
+    if (String(n.is_read) === '1' || Number(n.is_read) === 1) continue;
+
+    seenIncomingCallIds.add(id);
+    pendingVoiceCaller = n.source_username || '';
+    showIncomingCall(
+      n.source_username || 'Caller',
+      n.source_avatar || null,
+      n.message || 'Tap Open to go to the call.',
+      n.id
+    );
+    break;
+  }
+}
+
 async function refreshNotifBadge() {
-  const j = await fetchNotifications(5);
+  const j = await safeFetchJson('notifications.php?limit=20', { credentials:'same-origin' });
   if (!j) return;
-  const unread = j.unread_count || (Array.isArray(j.notifications) ? j.notifications.filter(n=>!n.is_read).length : 0);
+
+  const unread = j.unread_count || (Array.isArray(j.notifications) ? j.notifications.filter(n => !n.is_read).length : 0);
   if (unread > 0) {
-    notifBadge.style.display='inline-block';
+    notifBadge.style.display = 'inline-block';
     notifBadge.textContent = unread > 99 ? '99+' : String(unread);
   } else {
-    notifBadge.style.display='none';
+    notifBadge.style.display = 'none';
+  }
+
+  if (Array.isArray(j.notifications)) {
+    maybeShowIncomingFromNotifications(j.notifications);
   }
 }
-refreshNotifBadge();
-setInterval(refreshNotifBadge, 30000);
 
-notifBtn?.addEventListener('click', async (e)=> {
-  e.stopPropagation();
-  const j = await fetchNotifications(200);
-  notifDrawer.innerHTML = '';
-  if (!j || !Array.isArray(j.notifications) || j.notifications.length === 0) {
-    notifDrawer.innerHTML = '<div style="padding:12px;color:var(--muted)">No notifications</div>';
-  } else {
-    j.notifications.forEach(n => {
-      const row = document.createElement('div');
-      row.className = 'notifRow';
-      row.innerHTML = `<div class="notifTitle">${escapeHtml(n.source_username||'System')}</div><div class="notifMsg">${escapeHtml((n.message||'').slice(0,140))}</div>`;
-      row.addEventListener('click', async ()=> {
-        try { await fetch('notifications.php', { method:'POST', credentials:'same-origin', body: new URLSearchParams({ action:'mark_read', id: n.id }) }); } catch(e){}
-        const refCode = n.ref_code || n.ref || n.code || null;
-        if (refCode) { location.href = 'mobile_private.php?code=' + encodeURIComponent(refCode); return; }
-        if (n.type && String(n.type).indexOf('dm') !== -1 && n.source_username) {
-          location.href = 'mobile_message.php?user=' + encodeURIComponent(n.source_username);
-          return;
-        }
-        if (n.ref_id) {
-          location.href = 'mobile_private.php?code=' + encodeURIComponent(n.ref_id);
-          return;
-        }
-        location.reload();
-      });
-      notifDrawer.appendChild(row);
-    });
+async function loadNotifications(opened = false) {
+  const j = await safeFetchJson('notifications.php?limit=200', { credentials:'same-origin' });
+  if (!j) return;
+
+  const unread = j.unread_count || 0;
+  if (unread > lastUnread && lastUnread !== 0 && audioUnlocked) {
+    try {
+      if (notifBellAudio) {
+        notifBellAudio.currentTime = 0;
+        notifBellAudio.play().catch(() => {});
+      }
+    } catch (e) {}
   }
-  notifDrawer.style.display = notifDrawer.style.display === 'block' ? 'none' : 'block';
+  lastUnread = unread;
+
+  notifBadge.style.display = unread > 0 ? 'inline-block' : 'none';
+  notifBadge.textContent = unread > 99 ? '99+' : String(unread);
+
+  const rows = Array.isArray(j.notifications) ? j.notifications : [];
+  maybeShowIncomingFromNotifications(rows);
+
+  notifDrawer.innerHTML = '';
+  if (rows.length === 0) {
+    notifDrawer.innerHTML = '<div style="padding:12px;color:var(--muted)">No notifications</div>';
+    return;
+  }
+
+  rows.forEach(n => {
+    const row = document.createElement('div');
+    row.className = 'notifRow';
+    row.innerHTML = `<div class="notifTitle">${escapeHtml(n.source_username || 'System')}${isVoiceCallNotification(n) ? ' · voice call' : ''}</div><div class="notifMsg">${escapeHtml((n.message || '').slice(0,140))}</div>`;
+    row.addEventListener('click', async () => {
+      try {
+        await fetch('notifications.php', {
+          method:'POST',
+          credentials:'same-origin',
+          body: new URLSearchParams({ action:'mark_read', id: n.id })
+        });
+        marked.add(String(n.id));
+      } catch (e) {}
+
+      if (isVoiceCallNotification(n)) {
+        pendingVoiceCaller = n.source_username || '';
+        showIncomingCall(
+          n.source_username || 'Caller',
+          n.source_avatar || null,
+          n.message || 'Tap Open to go to the call.',
+          n.id
+        );
+        notifDrawer.style.display = 'none';
+        return;
+      }
+
+      const refCode = n.ref_code || n.ref || n.code || null;
+      if (refCode) {
+        location.href = 'mobile_private.php?code=' + encodeURIComponent(refCode);
+        return;
+      }
+      if (n.type && String(n.type).indexOf('dm') !== -1 && n.source_username) {
+        location.href = 'mobile_message.php?user=' + encodeURIComponent(n.source_username);
+        return;
+      }
+      location.reload();
+    });
+    notifDrawer.appendChild(row);
+  });
+}
+
+async function fetchCallState() {
+  const j = await safeFetchJson('community_interface.php?action=call_state', { credentials:'same-origin' });
+  if (!j || !j.call) return;
+
+  const call = j.call;
+  const callId = String(call.id || '');
+
+  if (call.status === 'ringing' && Number(call.callee_id) === Number(ME_ID)) {
+    if (String(activeIncomingCall || '') !== callId) {
+      showIncomingCall(
+        call.caller_username || 'Caller',
+        call.caller_avatar || null,
+        'Tap Open to jump back in.',
+        call.id
+      );
+    }
+  } else if (activeIncomingCall && String(activeIncomingCall) === callId && call.status !== 'ringing') {
+    hideIncomingCall();
+  }
+}
+
+async function immediatePoll() {
+  try {
+    await Promise.all([
+      refreshNotifBadge(),
+      fetchVoiceCounts(),
+      fetchCallState()
+    ]);
+  } catch (e) {
+    // swallow all network issues so the page never breaks
+  } finally {
+    if (!document.hidden) {
+      pollLoopTimer = setTimeout(immediatePoll, 2500);
+    } else {
+      pollLoopTimer = setTimeout(immediatePoll, 6000);
+    }
+  }
+}
+
+notifBtn?.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  if (notifDrawer.style.display === 'block') {
+    notifDrawer.style.display = 'none';
+    return;
+  }
+  await loadNotifications(true);
+  notifDrawer.style.display = 'block';
 });
-document.addEventListener('click', (e)=> {
+
+document.addEventListener('click', (e) => {
   if (!e.target.closest || (!e.target.closest('#notifBtn') && !e.target.closest('#notifDrawer'))) {
     notifDrawer.style.display = 'none';
   }
 });
 
-// initial load
+INCOMING_ACCEPT.addEventListener('click', async () => {
+  const caller = pendingVoiceCaller || (INCOMING_TITLE.textContent || '').replace(' is calling you', '').trim();
+  hideIncomingCall();
+
+  if (caller) {
+    location.href = 'mobile_message.php?user=' + encodeURIComponent(caller);
+  }
+});
+
+INCOMING_DISMISS.addEventListener('click', async () => {
+  hideIncomingCall();
+});
+
+INCOMING_CALL.addEventListener('click', (e) => {
+  if (e.target === INCOMING_CALL) hideIncomingCall();
+});
+
 (function markInitial() {
   const selected = INITIAL_SELECTED_CODE;
   const selectedKind = INITIAL_SELECTED_KIND;
@@ -1453,11 +1799,20 @@ async function startVoicePolling() {
   voicePollTimer = setInterval(fetchVoiceCounts, 12000);
 }
 
-window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') closeSheet(); });
-window.addEventListener('beforeunload', ()=> { if (voicePollTimer) clearInterval(voicePollTimer); });
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSheet();
+});
+window.addEventListener('beforeunload', () => {
+  if (voicePollTimer) clearInterval(voicePollTimer);
+  if (notifPollTimer) clearInterval(notifPollTimer);
+  if (pollLoopTimer) clearTimeout(pollLoopTimer);
+  stopIncomingCallRinger();
+});
 
-startVoicePolling().catch(()=>{});
-    
+startVoicePolling().catch(() => {});
+refreshNotifBadge();
+immediatePoll();
+
 function getIframeDoc() {
   const ifr = document.getElementById('chatFrame');
   if (!ifr) return null;
@@ -1485,17 +1840,14 @@ function enhanceIframeElements() {
         const rawHref = a.getAttribute('href');
         if (!rawHref) return;
 
-        // Make the browser prefer top-level navigation.
         a.setAttribute('target', '_top');
         a.setAttribute('rel', 'noopener noreferrer');
 
-        // Resolve relative links against the iframe document.
         let resolvedHref = rawHref;
         try {
           resolvedHref = new URL(rawHref, doc.baseURI).href;
         } catch (e) {}
 
-        // Keep the anchor clickable, but force top-level navigation.
         a.addEventListener('click', (ev) => {
           const href = a.getAttribute('href');
           if (!href) return;
@@ -1508,7 +1860,6 @@ function enhanceIframeElements() {
       } catch (e) {}
     });
 
-    // Catch any link clicks that still slip through.
     doc.addEventListener('click', (ev) => {
       const a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
       if (!a) return;
@@ -1527,7 +1878,6 @@ function enhanceIframeElements() {
       openInTop(resolvedHref);
     }, true);
 
-    // Optional: keep form submissions in the top window too.
     doc.addEventListener('submit', (ev) => {
       const form = ev.target;
       if (!form || !form.getAttribute) return;
@@ -1565,8 +1915,7 @@ function enhanceIframeOnceLoaded() {
   new MutationObserver(() => {
     enhanceIframeOnceLoaded();
   }).observe(document.getElementById('iframeWrap'), { childList: true, subtree: false });
-})();   
-    
+})();
 </script>
 </body>
 </html>
