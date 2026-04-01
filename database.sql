@@ -39,6 +39,24 @@ CREATE TABLE `account_deletions` (
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+--
+-- Table structure for table `dm_calls`
+--
+
+CREATE TABLE `dm_calls` (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `room` VARCHAR(64) NOT NULL,
+  `caller_id` INT NOT NULL,
+  `callee_id INT NOT NULL,
+  `status ENUM('ringing','accepted','declined','ended','expired') NOT NULL DEFAULT 'ringing',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `expires_at` DATETIME NOT NULL,
+  `responded_at` DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY idx_dm_calls_pair_status (caller_id, callee_id, status, expires_at),
+  KEY idx_dm_calls_room (room)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 -- --------------------------------------------------------
 
 --
