@@ -30,13 +30,20 @@ function e($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
   --muted:#aab4c5;
   --text:#eef4ff;
   --accent:#5865F2;
+  --accent-rgb:88,101,242;
   --mine:#234f85;
   --card:rgba(255,255,255,.03);
 }
 *{box-sizing:border-box}
-html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Arial;-webkit-font-smoothing:antialiased;overflow:hidden}
+html,body{height:100%;margin:0;color:var(--text);font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Arial;-webkit-font-smoothing:antialiased;overflow:hidden}
+body{
+  display:flex;flex-direction:column;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(var(--accent-rgb), .16), transparent 38%),
+    radial-gradient(circle at 80% 0%, rgba(255,255,255,.04), transparent 26%),
+    var(--bg);
+}
 button,input,textarea{font:inherit}
-body{display:flex;flex-direction:column}
 .shell{display:flex;flex-direction:column;height:100vh;min-height:0}
 .topbar{
   position:sticky;top:0;z-index:30;
@@ -61,7 +68,7 @@ body{display:flex;flex-direction:column}
 .main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 10px 8px;gap:10px;overflow:hidden}
 .chatHeader{
   display:flex;align-items:center;justify-content:space-between;gap:10px;
-  padding:12px 14px;border-radius:18px;background:linear-gradient(135deg, rgba(255,255,255,.03), rgba(88,101,242,.08));
+  padding:12px 14px;border-radius:18px;background:linear-gradient(135deg, rgba(255,255,255,.03), rgba(var(--accent-rgb), .10));
   border:1px solid rgba(255,255,255,.04);box-shadow:0 16px 40px rgba(0,0,0,.22)
 }
 .chatHeader .who{min-width:0;display:flex;align-items:center;gap:12px}
@@ -117,7 +124,7 @@ body{display:flex;flex-direction:column}
 .replyPreview .rpCancel{margin-left:auto;background:transparent;border:0;color:#ff8f8f;font-size:18px;cursor:pointer}
 .composer{
   display:flex;align-items:flex-end;gap:8px;
-  padding:10px;border-radius:20px;background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02));
+  padding:10px;border-radius:20px;background:linear-gradient(180deg, rgba(var(--accent-rgb), .04), rgba(255,255,255,.02));
   border:1px solid rgba(255,255,255,.04);box-shadow:0 12px 30px rgba(0,0,0,.18)
 }
 #msg{flex:1;min-height:46px;max-height:140px;resize:none;padding:12px 12px;border-radius:14px;border:0;background:#0d1118;color:#fff;font-size:16px;outline:none}
@@ -340,6 +347,7 @@ const POLL_INTERVAL = 8000;
 const MAX_MESSAGE_LENGTH = 750;
 const NOTIF_API = 'notifications.php';
 const UPLOAD_API = 'upload_image.php';
+
 const SHEET = document.getElementById('sheet');
 const SHEET_OVERLAY = document.getElementById('sheetOverlay');
 const VOICE_MODAL = document.getElementById('voiceModal');
@@ -394,6 +402,7 @@ const yourFriendCount = document.getElementById('yourFriendCount');
 
 let audioUnlocked = false;
 document.addEventListener('pointerdown', ()=> audioUnlocked = true, { once:true });
+
 let running = true;
 let lastId = 0;
 let currentUser = null;
@@ -405,13 +414,12 @@ let lastTypingAt = 0;
 let messagesById = new Map();
 let pendingVoiceCaller = '';
 let lastIncomingVoiceNotificationId = null;
+let incomingVoiceSeen = new Set();
+let incomingVoiceRinger = null;
+let activeIncomingVoice = null;
 
 function escapeHtml(s){ if (s==null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
 function escapeAttr(s){ return escapeHtml(s).replace(/`/g,'&#096;'); }
-function safeUrl(raw){
-  try { const u = new URL(String(raw), window.location.href); if (!['http:','https:'].includes(u.protocol)) return ''; return u.href; }
-  catch(e){ return ''; }
-}
 function normalizeText(s){
   return String(s || '')
     .replace(/\r\n?/g,'\n')
@@ -419,13 +427,57 @@ function normalizeText(s){
     .replace(/\n{3,}/g,'\n\n')
     .trim();
 }
+function parseTS(ts){ if (!ts) return null; const d = new Date(ts); return isNaN(d) ? null : d; }
+function relativeTime(ts){ const d = parseTS(ts); if (!d) return ''; const diff = (Date.now() - d.getTime())/1000; if (diff < 5) return 'just now'; if (diff < 60) return Math.floor(diff) + 's'; if (diff < 3600) return Math.floor(diff/60) + 'm'; if (diff < 86400) return Math.floor(diff/3600) + 'h'; return d.toLocaleDateString(); }
 function formatBioHtml(bio){
   if (!bio) return '<span style="color:var(--muted)">(no bio)</span>';
   const cleaned = normalizeText(bio);
   if (!cleaned) return '<span style="color:var(--muted)">(no bio)</span>';
   return escapeHtml(cleaned).replace(/\n/g,'<br>');
 }
-function setAvatar(el, user){
+function hexFromRGB(r,g,b){
+  return '#' + [r,g,b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2,'0')).join('');
+}
+function applyThemeFromRGB(r,g,b){
+  const root = document.documentElement.style;
+  const rr = Math.max(0, Math.min(255, Math.round(r)));
+  const gg = Math.max(0, Math.min(255, Math.round(g)));
+  const bb = Math.max(0, Math.min(255, Math.round(b)));
+  root.setProperty('--accent-rgb', `${rr},${gg},${bb}`);
+  root.setProperty('--accent', hexFromRGB(rr, gg, bb));
+}
+function applyAvatarThemeFromUrl(url){
+  try {
+    if (!url) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const size = 28;
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, size, size);
+        const data = ctx.getImageData(0, 0, size, size).data;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const a = data[i + 3];
+          if (a < 40) continue;
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
+          n++;
+        }
+        if (n > 0) applyThemeFromRGB(r / n, g / n, b / n);
+      } catch (e) {}
+    };
+    img.onerror = () => {};
+    img.src = url;
+  } catch (e) {}
+}
+function setAvatar(el, user, tintTheme = false){
   el.innerHTML = '';
   const url = user && user.avatar ? ((String(user.avatar).indexOf('/') === 0 || String(user.avatar).startsWith('http')) ? user.avatar : 'avatars/' + encodeURIComponent(user.avatar)) : '';
   if (url) {
@@ -433,14 +485,18 @@ function setAvatar(el, user){
     img.src = url;
     img.alt = user && user.username ? user.username : '';
     el.appendChild(img);
+    if (tintTheme) applyAvatarThemeFromUrl(url);
   } else {
     el.textContent = (user && user.username ? user.username[0] : '?').toUpperCase();
   }
 }
-const incomingVoiceSeen = new Set();
-let incomingVoiceRinger = null;
-let activeIncomingVoice = null;
-
+function safeUrl(raw){
+  try {
+    const u = new URL(String(raw), window.location.href);
+    if (!['http:','https:'].includes(u.protocol)) return '';
+    return u.href;
+  } catch(e){ return ''; }
+}
 function normalizeVoiceCallText(n){
   if (!n) return '';
   return [n.type, n.kind, n.category, n.action, n.ref_type, n.message, n.message_text, n.message_body, n.title, n.subject, n.source_username]
@@ -462,7 +518,7 @@ function stopIncomingCallRinger(){
     clearInterval(incomingVoiceRinger);
     incomingVoiceRinger = null;
   }
-  try { const a = document.getElementById('bell2'); if (a) { a.pause(); a.currentTime = 0; } } catch(e){}
+  try { const a = document.getElementById('bell2'); if (a) { a.loop = false; a.pause(); a.currentTime = 0; } } catch(e){}
 }
 function startIncomingCallRinger(){
   stopIncomingCallRinger();
@@ -504,11 +560,9 @@ function ensureIncomingCallVisible(force = false){
     INCOMING_CALL.setAttribute('aria-hidden','false');
   }
 }
-function escapeForRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 const EMOJI_RE = /([\u{1F1E6}-\u{1FAFF}\u2600-\u27BF])/gu;
 function renderMessageText(raw){
   let s = escapeHtml(String(raw || ''));
-  s = s.replace(/!\[image\]\((\/images\/[^[\s)]+)\)/g, '$1');
   s = s.replace(/!\[image\]\((\/images\/[^\s)]+)\)/g, (_, path) => {
     const safe = '/images/' + encodeURIComponent(path.replace(/^\/images\//,''));
     return `<img src="${escapeAttr(safe)}" alt="image">`;
@@ -518,29 +572,39 @@ function renderMessageText(raw){
   s = s.replace(EMOJI_RE, '<span class="bigEmoji">$1</span>');
   return s;
 }
-function parseTS(ts){ if (!ts) return null; const d = new Date(ts); return isNaN(d) ? null : d; }
-function relativeTime(ts){ const d = parseTS(ts); if (!d) return ''; const diff = (Date.now() - d.getTime())/1000; if (diff < 5) return 'just now'; if (diff < 60) return Math.floor(diff) + 's'; if (diff < 3600) return Math.floor(diff/60) + 'm'; if (diff < 86400) return Math.floor(diff/3600) + 'h'; return d.toLocaleDateString(); }
-function apiGet(params){ const q = new URLSearchParams(params).toString(); return fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + (q ? '&' + q : ''), { credentials:'same-origin' }).then(r => r.json()); }
-
+function apiGet(params){
+  const q = new URLSearchParams(params).toString();
+  return fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + (q ? '&' + q : ''), { credentials:'same-origin' }).then(r => r.json());
+}
+function normalizeRoomSlug(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+function voiceRoomForPair(a, b){
+  const parts = [normalizeRoomSlug(a), normalizeRoomSlug(b)].filter(Boolean).sort();
+  return 'dmvoice_' + (parts.join('__') || 'room');
+}
+function setSheet(tab){
+  const p = tab === 'profile';
+  tabProfile.classList.toggle('active', p);
+  tabFriends.classList.toggle('active', !p);
+  panelProfile.style.display = p ? 'block' : 'none';
+  panelFriends.style.display = p ? 'none' : 'block';
+}
 function openSheet(tab='profile'){
   SHEET.classList.add('open');
   SHEET_OVERLAY.classList.add('open');
   SHEET.setAttribute('aria-hidden','false');
-  switchTab(tab);
+  setSheet(tab);
 }
 function closeSheet(){
   SHEET.classList.remove('open');
   SHEET_OVERLAY.classList.remove('open');
   SHEET.setAttribute('aria-hidden','true');
 }
-function switchTab(tab){
-  const profile = tab === 'profile';
-  tabProfile.classList.toggle('active', profile);
-  tabFriends.classList.toggle('active', !profile);
-  panelProfile.style.display = profile ? 'block' : 'none';
-  panelFriends.style.display = profile ? 'none' : 'block';
-}
-
 function makeFriendCard(f){
   const card = document.createElement('div');
   card.className = 'friendCard';
@@ -560,29 +624,30 @@ function makeFriendCard(f){
   card.addEventListener('click', ()=> { if (f && f.username) location.href = 'mobile_message.php?user=' + encodeURIComponent(f.username); });
   return card;
 }
-
 function updateHeader(target){
   if (!target) return;
   headerName.textContent = target.username || TARGET;
   headerMeta.textContent = target.bio ? 'Profile loaded' : 'No bio provided';
   sideUsername.textContent = target.username || TARGET;
-  sideRole.textContent = target.role_name ? target.role_name : '';
+  sideRole.textContent = target.role ? target.role : '';
   sideBio.innerHTML = formatBioHtml(target.bio || '');
   headerAvatar.innerHTML = '';
   sidePfp.innerHTML = '';
-  const makeAvatar = (el) => {
+
+  const makeAvatar = (el, tint=false) => {
     if (target.avatar) {
       const img = document.createElement('img');
-      img.src = (String(target.avatar).indexOf('/') === 0 || String(target.avatar).startsWith('http')) ? target.avatar : 'avatars/' + encodeURIComponent(target.avatar);
+      const url = (String(target.avatar).indexOf('/') === 0 || String(target.avatar).startsWith('http')) ? target.avatar : 'avatars/' + encodeURIComponent(target.avatar);
+      img.src = url;
       el.appendChild(img);
+      if (tint) applyAvatarThemeFromUrl(url);
     } else {
       el.textContent = (target.username ? target.username[0] : '?').toUpperCase();
     }
   };
-  makeAvatar(headerAvatar);
-  makeAvatar(sidePfp);
+  makeAvatar(headerAvatar, true);
+  makeAvatar(sidePfp, false);
 }
-
 function updateRelationshipUI(){
   const rel = relationship || {};
   if (rel.status === 'friends') {
@@ -607,16 +672,15 @@ function updateRelationshipUI(){
   else { blockBtn.textContent = 'Block'; blockBtn.dataset.blocked = '0'; }
 
   const canMessage = rel.allowed !== false && !rel.blocked;
-  document.getElementById('msg').disabled = !canMessage;
+  msgEl.disabled = !canMessage;
   sendBtn.disabled = !canMessage;
-  document.getElementById('msg').placeholder = canMessage ? 'Send a message…' : 'Messaging unavailable';
+  msgEl.placeholder = canMessage ? 'Send a message…' : 'Messaging unavailable';
 
   if (rel.status === 'friends') {
     voiceBtn.classList.add('primary');
     voiceBtn2.classList.add('primary');
   }
 }
-
 function renderProfileSection(target, rel){
   updateHeader(target || { username: TARGET });
   if (target && target.bio) headerMeta.textContent = normalizeText(target.bio).split('\n')[0].slice(0, 80) || 'Profile loaded';
@@ -632,7 +696,6 @@ function renderProfileSection(target, rel){
     visibleTheirFriends.forEach(f => theirFriendsEl.appendChild(makeFriendCard(f)));
   }
 }
-
 function renderYourFriends(list){
   const rows = Array.isArray(list) ? list : [];
   yourFriendCount.textContent = String(rows.length);
@@ -643,7 +706,6 @@ function renderYourFriends(list){
   }
   rows.forEach(f => yourFriendsEl.appendChild(makeFriendCard(f)));
 }
-
 function cleanRoomAvatar(m){
   const wrap = document.createElement('div');
   wrap.className = 'msgAvatar';
@@ -656,7 +718,6 @@ function cleanRoomAvatar(m){
   }
   return wrap;
 }
-
 function buildMessageDom(m, showAvatar){
   const row = document.createElement('div');
   row.className = 'msgRow' + ((m.user_id === MY_ID) ? ' mine' : '');
@@ -716,7 +777,6 @@ function buildMessageDom(m, showAvatar){
   attachGestures(row, bubble, m);
   return row;
 }
-
 function attachGestures(row, bubble, m){
   let startX = 0, startY = 0, lastX = 0, lastY = 0, active = false, longPressTimer = null, moved = false;
   const isMine = (m.user_id === MY_ID);
@@ -745,7 +805,7 @@ function attachGestures(row, bubble, m){
     if (Math.abs(dx) > Math.abs(dy)) {
       const limited = Math.max(-8, Math.min(40, dx * 0.20));
       bubble.style.transform = `translateX(${limited}px)`;
-      if (dx > 30) bubble.style.background = 'rgba(88,101,242,.14)';
+      if (dx > 30) bubble.style.background = 'rgba(var(--accent-rgb), .14)';
     }
     if (Math.abs(dx) > 14 || Math.abs(dy) > 14) {
       if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
@@ -763,13 +823,12 @@ function attachGestures(row, bubble, m){
   row.addEventListener('pointercancel', cleanup);
   row.addEventListener('pointerleave', ()=> { if (!active) cleanup(); });
 }
-
 function setReplyFromRow(row){
   replyingTo = { id: row.dataset.id, username: row.dataset.username || '', excerpt: row.dataset.excerpt || '' };
   rpUser.textContent = replyingTo.username || '…';
   rpText.textContent = replyingTo.excerpt || '';
   rpPreview.style.display = 'flex';
-  document.getElementById('msg').focus();
+  msgEl.focus();
 }
 function clearReply(){
   replyingTo = null;
@@ -788,10 +847,8 @@ async function editMessageById(id){
   const fd = new FormData(); fd.append('id', id); fd.append('message', next);
   const res = await fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&mode=edit', { method:'POST', body: fd, credentials:'same-origin' });
   const j = await res.json().catch(()=>null);
-  if (j && j.ok) await pollOnce();
-  else alert(j && j.error ? j.error : 'Edit failed');
+  if (j && j.ok) await pollOnce(); else alert(j && j.error ? j.error : 'Edit failed');
 }
-
 async function send(){
   const text = msgEl.value.trim();
   if (!text) return;
@@ -803,7 +860,6 @@ async function send(){
   msgEl.value = ''; charCount.textContent = '0/750'; clearReply();
   await pollOnce();
 }
-
 async function uploadAndSendImage(file){
   try {
     if (!file) return;
@@ -846,12 +902,6 @@ IMAGE_INPUT.addEventListener('change', async (e)=> {
   IMAGE_INPUT.value = '';
 });
 
-function updateTyping(list){
-  const names = Array.isArray(list) ? list.filter(Boolean) : [];
-  if (names.length === 0) { typingBar.textContent = ''; return; }
-  typingBar.textContent = names.length === 1 ? `${names[0]} is typing…` : names.slice(0,3).join(', ') + ' are typing…';
-}
-
 function appendMessages(messages){
   if (!Array.isArray(messages) || messages.length === 0) return;
   const nearBottom = (chatEl.scrollHeight - (chatEl.scrollTop + chatEl.clientHeight)) < 180;
@@ -874,6 +924,100 @@ function appendMessages(messages){
   }
   if (appended && nearBottom) chatEl.scrollTop = chatEl.scrollHeight;
 }
+function updateTyping(list){
+  const names = Array.isArray(list) ? list.filter(Boolean) : [];
+  if (names.length === 0) { typingBar.textContent = ''; return; }
+  typingBar.textContent = names.length === 1 ? `${names[0]} is typing…` : names.slice(0,3).join(', ') + ' are typing…';
+}
+
+function makeRoom(userName){
+  return voiceRoomForPair(MY_USERNAME, (userName || TARGET || '').trim());
+}
+async function openVoice(userName){
+  const who = (userName || TARGET || '').trim();
+  const room = makeRoom(who);
+  VOICE_TITLE.textContent = 'Voice with ' + who;
+  VOICE_FRAME.src = 'message_voice.php?room=' + encodeURIComponent(room) + '&embed=1&user=' + encodeURIComponent(who);
+  VOICE_MODAL.classList.add('open');
+  VOICE_MODAL.setAttribute('aria-hidden', 'false');
+  voiceStatus.textContent = 'Connecting to call…';
+}
+async function closeVoice(){
+  VOICE_MODAL.classList.remove('open');
+  VOICE_MODAL.setAttribute('aria-hidden', 'true');
+  VOICE_FRAME.src = 'about:blank';
+  try {
+    await fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&mode=voice_call_end', {
+      method: 'POST',
+      credentials: 'same-origin'
+    });
+  } catch (e) {}
+}
+async function startVoiceCall(){
+  await openVoice(TARGET);
+  try {
+    const r = await fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&mode=voice_call_invite', {
+      method:'POST',
+      credentials:'same-origin'
+    });
+    const j = await r.json().catch(()=>null);
+    if (j && j.ok) {
+      lastCallId = Number(j.call_id || lastCallId || 0);
+      lastCallStatus = 'ringing';
+    }
+  } catch (e) {}
+}
+
+let lastCallId = 0;
+let lastCallStatus = '';
+
+voiceBtn.addEventListener('click', startVoiceCall);
+voiceBtn2.addEventListener('click', startVoiceCall);
+voiceCloseBtn.addEventListener('click', closeVoice);
+voiceLeaveBtn.addEventListener('click', closeVoice);
+window.addEventListener('message', (ev)=> {
+  const d = ev.data || {};
+  if (d && d.type === 'voice-status') voiceStatus.textContent = d.text || 'In call';
+  if (d && d.type === 'close-message-voice') closeVoice();
+});
+
+INCOMING_ACCEPT.addEventListener('click', async ()=> {
+  const caller = pendingVoiceCaller || TARGET;
+  try {
+    await fetch('message_interface.php?user=' + encodeURIComponent(caller) + '&mode=voice_call_accept', {
+      method: 'POST',
+      credentials: 'same-origin'
+    });
+  } catch (e) {}
+  hideIncomingCall();
+  await openVoice(caller);
+  lastCallStatus = 'accepted';
+});
+INCOMING_DISMISS.addEventListener('click', async ()=> {
+  const caller = pendingVoiceCaller || TARGET;
+  try {
+    await fetch('message_interface.php?user=' + encodeURIComponent(caller) + '&mode=voice_call_dismiss', {
+      method: 'POST',
+      credentials: 'same-origin'
+    });
+  } catch (e) {}
+  hideIncomingCall();
+  lastCallStatus = 'declined';
+});
+INCOMING_CALL.addEventListener('click', (e)=> { if (e.target === INCOMING_CALL) INCOMING_DISMISS.click(); });
+
+function renderCallState(call){
+  if (!call) return;
+  lastCallId = Math.max(lastCallId, Number(call.id) || 0);
+  lastCallStatus = String(call.status || lastCallStatus || '');
+  if (String(call.status) === 'ringing' && Number(call.callee_id) === Number(MY_ID)) {
+    if (String(activeIncomingVoice || '') !== String(call.id)) {
+      showIncomingCall(call.caller_username || TARGET, call.caller_avatar || null, 'Tap accept to join this voice call.', call.id);
+    }
+  } else if (activeIncomingVoice && String(activeIncomingVoice) === String(call.id) && String(call.status) !== 'ringing') {
+    hideIncomingCall();
+  }
+}
 
 async function loadOnce(){
   const r = await apiGet({});
@@ -892,13 +1036,14 @@ async function loadOnce(){
   lastId = 0;
   appendMessages(r.messages || []);
   if (r.messages && r.messages.length === 0) chatEl.innerHTML = '<div class="emptyState">Say hello 👋</div>';
+  if (r.call) renderCallState(r.call);
 }
 
 async function pollOnce(){
   if (inFlight) return;
   inFlight = true;
   try {
-    const r = await fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&since=' + encodeURIComponent(lastId), { credentials:'same-origin' });
+    const r = await fetch('message_interface.php?user=' + encodeURIComponent(TARGET) + '&since=' + encodeURIComponent(lastId) + '&call_since=' + encodeURIComponent(lastCallId) + '&call_status=' + encodeURIComponent(lastCallStatus), { credentials:'same-origin' });
     if (!r.ok) return;
     const j = await r.json();
     if (j.target) { currentUser = j.target; renderProfileSection(j.target, relationship); }
@@ -910,7 +1055,10 @@ async function pollOnce(){
     }
     if (j.typing) updateTyping(j.typing);
     if (Array.isArray(j.friends)) renderYourFriends(j.friends);
-  } catch(e) { console.error('pollOnce', e); }
+    if (j.call) renderCallState(j.call);
+  } catch(e) {
+    console.error('pollOnce', e);
+  }
   inFlight = false;
 }
 async function longPollLoop(){
@@ -940,63 +1088,10 @@ blockBtn.addEventListener('click', async ()=> {
   if (j && j.ok) await loadOnce(); else alert(j && j.error ? j.error : 'Failed');
 });
 
-function normalizeRoomSlug(s){
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '');
-}
-function voiceRoomForPair(a, b){
-  const parts = [normalizeRoomSlug(a), normalizeRoomSlug(b)].filter(Boolean).sort();
-  return 'dmvoice_' + (parts.join('__') || 'room');
-}
-function openVoice(userName){
-  const who = (userName || TARGET || '').trim();
-  const room = voiceRoomForPair(MY_USERNAME, who);
-  VOICE_TITLE.textContent = 'Voice with ' + who;
-  VOICE_FRAME.src = 'message_voice.php?room=' + encodeURIComponent(room) + '&embed=1';
-  VOICE_MODAL.classList.add('open');
-  VOICE_MODAL.setAttribute('aria-hidden', 'false');
-  voiceStatus.textContent = 'Connecting to call…';
-}
-function closeVoice(){
-  VOICE_MODAL.classList.remove('open');
-  VOICE_MODAL.setAttribute('aria-hidden', 'true');
-  VOICE_FRAME.src = 'about:blank';
-}
-voiceBtn.addEventListener('click', ()=> openVoice(TARGET));
-voiceBtn2.addEventListener('click', ()=> openVoice(TARGET));
-voiceCloseBtn.addEventListener('click', closeVoice);
-voiceLeaveBtn.addEventListener('click', closeVoice);
-window.addEventListener('message', (ev)=> {
-  const d = ev.data || {};
-  if (d && d.type === 'voice-status') voiceStatus.textContent = d.text || 'In call';
-  if (d && d.type === 'close-message-voice') closeVoice();
-});
-INCOMING_ACCEPT.addEventListener('click', ()=> { hideIncomingCall(); openVoice(pendingVoiceCaller || TARGET); });
-INCOMING_DISMISS.addEventListener('click', hideIncomingCall);
-INCOMING_CALL.addEventListener('click', (e)=> { if (e.target === INCOMING_CALL) hideIncomingCall(); });
-
-// keep the incoming call visually loud if one is active
-setInterval(()=> {
-  if (INCOMING_CALL.style.display === 'flex' && audioUnlocked) {
-    const title = INCOMING_TITLE.textContent || 'Incoming voice call';
-    if (!title.toLowerCase().includes('calling you')) {
-      INCOMING_TITLE.textContent = pendingVoiceCaller ? `${pendingVoiceCaller} is calling you` : 'Incoming voice call';
-    }
-  }
-}, 1200);
-
-const sidebarOpeners = [friendsBtn, sheetOpenBtn].filter(Boolean);
-sidebarOpeners.forEach(btn => btn.addEventListener('click', ()=> openSheet('profile')));
-closeSheetBtn.addEventListener('click', closeSheet);
-SHEET_OVERLAY.addEventListener('click', closeSheet);
-tabProfile.addEventListener('click', ()=> switchTab('profile'));
-tabFriends.addEventListener('click', ()=> switchTab('friends'));
-
 function fetchNotifications(limit=50){
-  return fetch(NOTIF_API + '?limit=' + encodeURIComponent(limit), { credentials:'same-origin' }).then(r => r.ok ? r.json() : ({ notifications:[], unread_count:0 })).catch(()=>({ notifications:[], unread_count:0 }));
+  return fetch(NOTIF_API + '?limit=' + encodeURIComponent(limit), { credentials:'same-origin' })
+    .then(r => r.ok ? r.json() : ({ notifications:[], unread_count:0 }))
+    .catch(()=>({ notifications:[], unread_count:0 }));
 }
 async function refreshNotifBadge(){
   const j = await fetchNotifications(5);
@@ -1011,14 +1106,15 @@ function renderNotifRow(n){
   const extra = isVoiceCallNotification(n) ? ' · voice call' : '';
   row.innerHTML = `<div class="notifTitle">${escapeHtml(n.source_username||'System')}${extra}</div><div class="notifMsg">${escapeHtml((n.message||'').slice(0,140))}</div>`;
   row.addEventListener('click', async ()=> {
-    try { await fetch(NOTIF_API, { method:'POST', credentials:'same-origin', body: new URLSearchParams({ action:'mark_read', id: n.id }) }); } catch(e){}
+    try {
+      await fetch(NOTIF_API, {
+        method:'POST',
+        credentials:'same-origin',
+        body: new URLSearchParams({ action:'mark_read', id: n.id })
+      });
+    } catch(e){}
     notifDropdown.style.display = 'none';
     const refCode = n.ref_code || n.ref || n.code || null;
-    if (isVoiceCallNotification(n)) {
-      incomingVoiceSeen.add(String(n.id));
-      showIncomingCall(n.source_username || TARGET, n.source_avatar || n.avatar || null, n.message || 'Tap accept to join this voice call.', n.id);
-      return;
-    }
     if (refCode) { location.href = 'mobile_private.php?code=' + encodeURIComponent(refCode); return; }
     if (n.type && String(n.type).indexOf('dm') !== -1 && n.source_username) { location.href = 'mobile_message.php?user=' + encodeURIComponent(n.source_username); return; }
     if (n.ref_id) { location.href = 'mobile_message.php?user=' + encodeURIComponent(n.source_username || TARGET); return; }
@@ -1028,40 +1124,45 @@ function renderNotifRow(n){
 async function loadNotifs(){
   const j = await fetchNotifications(200);
   const unread = j.unread_count || 0;
-  if (unread > lastUnread && lastUnread !== 0 && audioUnlocked) { try { const a = document.getElementById('bell2'); a.currentTime = 0; a.play().catch(()=>{}); } catch(e){} }
+  if (unread > lastUnread && lastUnread !== 0 && audioUnlocked) {
+    try { const a = document.getElementById('bell'); a.currentTime = 0; a.play().catch(()=>{}); } catch(e){}
+  }
   lastUnread = unread;
   notifBadge.style.display = unread > 0 ? 'inline-block' : 'none';
   notifBadge.textContent = unread > 99 ? '99+' : String(unread);
   notifDropdown.innerHTML = '';
   const rows = Array.isArray(j.notifications) ? j.notifications : [];
-
-  const callRow = rows.find(n => isVoiceCallNotification(n) && !incomingVoiceSeen.has(String(n.id)));
-  if (callRow) {
-    incomingVoiceSeen.add(String(callRow.id));
-    lastIncomingVoiceNotificationId = callRow.id;
-    showIncomingCall(
-      callRow.source_username || TARGET,
-      callRow.source_avatar || callRow.avatar || null,
-      callRow.message || callRow.title || 'Tap accept to join this voice call.',
-      callRow.id
-    );
-  }
-
   if (rows.length === 0) { notifDropdown.innerHTML = '<div class="emptyState">No notifications</div>'; return; }
   rows.forEach(n => notifDropdown.appendChild(renderNotifRow(n)));
 }
-notifBell.addEventListener('click', (e)=> { e.stopPropagation(); notifDropdown.style.display = notifDropdown.style.display === 'block' ? 'none' : 'block'; if (notifDropdown.style.display === 'block') loadNotifs(); });
-document.addEventListener('click', (e)=> { if (!e.target.closest || (!e.target.closest('#notifBell') && !e.target.closest('#notifDropdown'))) notifDropdown.style.display = 'none'; });
+notifBell.addEventListener('click', (e)=> {
+  e.stopPropagation();
+  notifDropdown.style.display = notifDropdown.style.display === 'block' ? 'none' : 'block';
+  if (notifDropdown.style.display === 'block') loadNotifs();
+});
+document.addEventListener('click', (e)=> {
+  if (!e.target.closest || (!e.target.closest('#notifBell') && !e.target.closest('#notifDropdown'))) notifDropdown.style.display = 'none';
+});
 
 friendsBtn.addEventListener('click', ()=> openSheet('friends'));
 sheetOpenBtn.addEventListener('click', ()=> openSheet('profile'));
+closeSheetBtn.addEventListener('click', closeSheet);
+SHEET_OVERLAY.addEventListener('click', closeSheet);
+tabProfile.addEventListener('click', ()=> setSheet('profile'));
+tabFriends.addEventListener('click', ()=> setSheet('friends'));
 
 document.getElementById('backBtn').addEventListener('click', ()=> { location.href = 'mobile_room.php'; });
-
-window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') { closeSheet(); closeVoice(); } });
+window.addEventListener('keydown', (e)=> { if (e.key === 'Escape') { closeSheet(); closeVoice(); hideIncomingCall(); } });
 window.addEventListener('beforeunload', ()=> running = false);
 
-loadOnce().then(()=> { refreshNotifBadge(); longPollLoop(); }).catch((e)=> { console.error('startup error', e); chatEl.innerHTML = '<div class="emptyState">Load error</div>'; });
+loadOnce().then(()=> {
+  refreshNotifBadge();
+  longPollLoop();
+}).catch((e)=> {
+  console.error('startup error', e);
+  chatEl.innerHTML = '<div class="emptyState">Load error</div>';
+});
+
 setInterval(()=> { if (!document.hidden) loadNotifs(); }, POLL_INTERVAL);
 </script>
 </body>
