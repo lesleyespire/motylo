@@ -254,7 +254,12 @@ button,input,textarea{font:inherit}
       </div>
       <div class="composer">
         <textarea id="msg" maxlength="750" placeholder="Send a message…" rows="1"></textarea>
-        <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none">
+        <input
+  id="imageInput"
+  type="file"
+  accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/heic,image/heif,image/heic-sequence,image/heif-sequence,.png,.jpg,.jpeg,.webp,.gif,.avif,.heic,.heif"
+  style="display:none"
+/>
         <div class="charCount" id="charCount">0/750</div>
         <button class="smallBtn" id="imageBtn" title="Attach image">📷</button>
         <button class="sendBtn" id="sendBtn">Send</button>
@@ -864,7 +869,7 @@ async function uploadAndSendImage(file){
   try {
     if (!file) return;
     if (file.size > 6 * 1024 * 1024) return alert('Image too large');
-    const allowed = ['image/png','image/jpeg','image/webp','image/gif'];
+    const allowed = ['image/png','image/jpeg','image/webp','image/gif', 'image/avif', 'image/heic', 'image/heif'];
     if (!allowed.includes(file.type)) return alert('Unsupported image type');
     if (relationship && relationship.allowed === false) return alert("You can't message this user yet.");
     const fd = new FormData();
