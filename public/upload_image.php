@@ -26,13 +26,16 @@ $uid = (int)$user['id'];
 // config
 $UPLOAD_DIR = __DIR__ . '/images';
 $WEB_PATH_PREFIX = '/images'; // used in returned url
-$MAX_BYTES = 2 * 1024 * 1024; // 2 MB limit (tweakable)
+$MAX_BYTES = 10 * 1024 * 1024; // 2 MB limit (tweakable)
 $ALLOWED_MIME = [
     'image/png'  => 'png',
     'image/jpeg' => 'jpg',
     'image/jpg'  => 'jpg',
     'image/webp' => 'webp',
     'image/gif'  => 'gif'
+    'image/avif' => 'avif'
+    'image/heic' => 'heic'
+    'image/heif' => 'heif'
 ];
 // cleanup older than 30 days
 $CLEANUP_OLDER_THAN = 30 * 24 * 3600;
